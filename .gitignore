@@ -1,0 +1,58 @@
+# Binaries
+mediaforge
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+ui/build/
+ui/.svelte-kit/
+internal/server/static/*
+!internal/server/static/.gitkeep
+
+# Dependencies
+ui/node_modules/
+
+# Environment and config
+.env
+.env.local
+*.env
+
+# Data directories (user data, should not be committed)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Go
+go.sum
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Development artifacts
+TASK.md
+AI_INTEGRATION_TASK.md
+*.test
+
+# Temporary files
+tmp/
+temp/
+*.tmp

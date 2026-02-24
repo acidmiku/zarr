@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  zarr:
+    build: .
+    container_name: zarr
+    ports:
+      - "9876:9876"
+    volumes:
+      - ./data/config:/config
+      - ./data/media:/data/media
+      - ./data/usenet:/data/usenet
+      - ./data/sabnzbd-config/Downloads:/sabnzbd-downloads
+    environment:
+      - TZ=Etc/UTC
+      # Optional: seed config via env vars
+      # - MEDIAFORGE_TMDB_API_KEY=...
+      # - MEDIAFORGE_PROXY=socks5://...
+      # - MEDIAFORGE_SABNZBD_API_KEY=...
+    depends_on:
+      - sabnzbd
+    networks:
+      - zarr-net
+    restart: unless-stopped
+
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./data/sabnzbd-config:/config
+      - ./data/usenet:/data/usenet
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    networks:
+      - zarr-net
+    restart: unless-stopped
+
+networks:
+  zarr-net:
+    driver: bridge
