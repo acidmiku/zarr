@@ -51,10 +51,27 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/ratings/{tmdbID}", s.handleGetRating)
 	s.mux.HandleFunc("DELETE /api/ratings/{tmdbID}", s.handleDeleteRating)
 
+	// Music
+	s.mux.HandleFunc("GET /api/music/search", s.handleMusicSearch)
+	s.mux.HandleFunc("GET /api/music/trending", s.handleMusicTrending)
+	s.mux.HandleFunc("GET /api/music/artist/{mbid}", s.handleMusicArtist)
+	s.mux.HandleFunc("GET /api/music/album/{rgid}", s.handleMusicAlbum)
+	s.mux.HandleFunc("POST /api/music/library", s.handleAddMusicToLibrary)
+	s.mux.HandleFunc("GET /api/music/library", s.handleListMusicLibrary)
+	s.mux.HandleFunc("GET /api/music/library/artists", s.handleListMusicArtists)
+	s.mux.HandleFunc("GET /api/music/library/{id}", s.handleGetMusicLibraryItem)
+	s.mux.HandleFunc("DELETE /api/music/library/{id}", s.handleDeleteMusicLibraryItem)
+	s.mux.HandleFunc("POST /api/music/library/{id}/search", s.handleSearchMusicAlbum)
+	s.mux.HandleFunc("PUT /api/music/library/{id}/rate", s.handleRateMusicAlbum)
+	s.mux.HandleFunc("GET /api/music/library/{id}/releases", s.handleMusicReleases)
+	s.mux.HandleFunc("POST /api/music/releases/grab", s.handleGrabMusicRelease)
+	s.mux.HandleFunc("GET /api/music/cover", s.handleMusicCover)
+
 	// Settings
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
 	s.mux.HandleFunc("POST /api/settings/test-openrouter", s.handleTestOpenRouter)
+	s.mux.HandleFunc("POST /api/settings/test-qbittorrent", s.handleTestQBittorrent)
 
 	// System
 	s.mux.HandleFunc("GET /api/system/status", s.handleSystemStatus)

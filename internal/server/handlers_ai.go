@@ -137,7 +137,7 @@ func (s *Server) buildRatingsMessage() string {
 		LEFT JOIN media_items m ON m.tmdb_id = r.tmdb_id AND m.type = r.media_type
 		ORDER BY r.rating DESC`)
 	if err != nil {
-		return "Based on my taste, what should I watch next?"
+		return "Based on my taste, what should I watch or listen to next?"
 	}
 	defer rows.Close()
 
@@ -158,11 +158,33 @@ func (s *Server) buildRatingsMessage() string {
 		count++
 	}
 
-	if count == 0 {
-		return "I haven't rated anything yet, but I'm looking for recommendations. What should I watch? Ask me about my preferences."
+	// Also include music ratings from albums table
+	musicRows, err := s.db.Query(`SELECT a.title, ar.name, a.rating, a.rating_comment
+		FROM albums a JOIN artists ar ON a.artist_id = ar.id
+		WHERE a.rating IS NOT NULL AND a.rating > 0
+		ORDER BY a.rating DESC`)
+	if err == nil {
+		defer musicRows.Close()
+		for musicRows.Next() {
+			var title, artistName string
+			var rating int
+			var comment *string
+			musicRows.Scan(&title, &artistName, &rating, &comment)
+			stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
+			commentStr := ""
+			if comment != nil && *comment != "" {
+				commentStr = fmt.Sprintf(` — "%s"`, *comment)
+			}
+			sb.WriteString(fmt.Sprintf("- %s - %s (music): %s%s\n", artistName, title, stars, commentStr))
+			count++
+		}
 	}
 
-	sb.WriteString("\nBased on my taste, what should I watch next?")
+	if count == 0 {
+		return "I haven't rated anything yet, but I'm looking for recommendations. What should I watch or listen to? Ask me about my preferences."
+	}
+
+	sb.WriteString("\nBased on my taste, what should I watch or listen to next?")
 	return sb.String()
 }
 
@@ -200,10 +222,11 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 
 	// Build tool executor
 	executor := &ai.ToolExecutor{
-		Jikan: s.aiJikan,
-		Brave: s.aiBrave,
-		DB:    s.db.DB,
-		TMDB:  s.tmdb,
+		Jikan:       s.aiJikan,
+		Brave:       s.aiBrave,
+		DB:          s.db.DB,
+		TMDB:        s.tmdb,
+		MusicBrainz: s.musicbrainz,
 	}
 
 	// Tool call loop

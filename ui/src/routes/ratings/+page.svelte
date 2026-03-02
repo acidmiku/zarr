@@ -42,8 +42,12 @@
 		loadRatings();
 	}
 
+	function itemKey(item) {
+		return item.album_id ? `music-${item.album_id}` : item.id;
+	}
+
 	function startEdit(item) {
-		editingId = item.id;
+		editingId = itemKey(item);
 		editRating = item.rating;
 		editComment = item.comment || '';
 	}
@@ -56,12 +60,16 @@
 		if (editRating < 1) return;
 		saving = true;
 		try {
-			await api.upsertRating({
-				tmdb_id: item.tmdb_id,
-				media_type: item.media_type,
-				rating: editRating,
-				comment: editComment
-			});
+			if (item.media_type === 'music' && item.album_id) {
+				await api.rateMusicAlbum(item.album_id, { rating: editRating, comment: editComment });
+			} else {
+				await api.upsertRating({
+					tmdb_id: item.tmdb_id,
+					media_type: item.media_type,
+					rating: editRating,
+					comment: editComment
+				});
+			}
 			notify('Rating updated', 'success');
 			editingId = null;
 			await loadRatings();
@@ -74,7 +82,11 @@
 	async function deleteRating(item) {
 		if (!confirm(`Remove your rating for "${item.title || 'this item'}"?`)) return;
 		try {
-			await api.deleteRating(item.tmdb_id, item.media_type);
+			if (item.media_type === 'music' && item.album_id) {
+				await api.rateMusicAlbum(item.album_id, { rating: 0, comment: '' });
+			} else {
+				await api.deleteRating(item.tmdb_id, item.media_type);
+			}
 			notify('Rating removed', 'success');
 			await loadRatings();
 		} catch (e) {
@@ -83,12 +95,14 @@
 	}
 
 	function typeLabel(item) {
+		if (item.media_type === 'music') return 'Music';
 		if (item.anime) return 'Anime';
 		if (item.media_type === 'movie') return 'Movie';
 		return 'Series';
 	}
 
 	function typeColor(item) {
+		if (item.media_type === 'music') return '#1db954';
 		if (item.anime) return 'var(--badge-anime)';
 		if (item.media_type === 'movie') return 'var(--badge-movie)';
 		return 'var(--badge-series)';
@@ -112,6 +126,9 @@
 	}
 
 	function posterUrl(item) {
+		if (item.media_type === 'music' && item.release_group_id) {
+			return api.musicCoverUrl(item.release_group_id);
+		}
 		if (!item.poster_url) return null;
 		return api.imageUrl(item.poster_url);
 	}
@@ -134,7 +151,7 @@
 
 	<div class="controls">
 		<div class="filter-group">
-			{#each [['all', 'All'], ['movie', 'Movies'], ['series', 'Series'], ['anime', 'Anime']] as [val, label]}
+			{#each [['all', 'All'], ['movie', 'Movies'], ['series', 'Series'], ['anime', 'Anime'], ['music', 'Music']] as [val, label]}
 				<button class:active={filterType === val} on:click={() => setType(val)}>{label}</button>
 			{/each}
 		</div>
@@ -154,8 +171,8 @@
 		</div>
 	{:else}
 		<div class="ratings-list">
-			{#each ratings as item (item.id)}
-				<div class="rating-row" class:editing={editingId === item.id}>
+			{#each ratings as item (item.album_id ? `music-${item.album_id}` : item.id)}
+				<div class="rating-row" class:editing={editingId === itemKey(item)}>
 					<div class="poster-thumb">
 						{#if posterUrl(item)}
 							<img src={posterUrl(item)} alt="" loading="lazy" />
@@ -166,7 +183,9 @@
 
 					<div class="info">
 						<div class="title-row">
-							{#if item.media_id}
+							{#if item.media_type === 'music' && item.album_id}
+								<a href="/music/{item.album_id}" class="title-link">{item.title || 'Unknown'}</a>
+							{:else if item.media_id}
 								<a href="/library/{item.media_id}" class="title-link">{item.title || 'Unknown'}</a>
 							{:else}
 								<span class="title-text">{item.title || 'Unknown'}</span>
@@ -177,7 +196,7 @@
 							<span class="type-badge" style="background: {typeColor(item)}">{typeLabel(item)}</span>
 						</div>
 
-						{#if editingId === item.id}
+						{#if editingId === itemKey(item)}
 							<div class="edit-form">
 								<div class="edit-stars">
 									<StarRating bind:value={editRating} />

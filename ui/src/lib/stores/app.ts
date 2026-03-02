@@ -6,27 +6,39 @@ export const downloads = writable<any[]>([]);
 export const profiles = writable<any[]>([]);
 
 // Theme
-function getInitialTheme(): 'dark' | 'light' {
+export type ThemeName = 'dark' | 'light' | 'ember' | 'violet' | 'rose' | 'mint';
+
+export const THEMES: { id: ThemeName; label: string; group: 'dark' | 'light'; swatch: string }[] = [
+	{ id: 'dark', label: 'Obsidian', group: 'dark', swatch: '#00d4ff' },
+	{ id: 'ember', label: 'Ember', group: 'dark', swatch: '#f59e0b' },
+	{ id: 'violet', label: 'Violet', group: 'dark', swatch: '#a78bfa' },
+	{ id: 'light', label: 'Light', group: 'light', swatch: '#0891b2' },
+	{ id: 'rose', label: 'Rose', group: 'light', swatch: '#e11d48' },
+	{ id: 'mint', label: 'Mint', group: 'light', swatch: '#10b981' },
+];
+
+const VALID_THEMES: Set<string> = new Set(THEMES.map(t => t.id));
+
+function getInitialTheme(): ThemeName {
 	if (browser) {
-		return (localStorage.getItem('mf-theme') as 'dark' | 'light') || 'dark';
+		const stored = localStorage.getItem('mf-theme');
+		if (stored && VALID_THEMES.has(stored)) return stored as ThemeName;
 	}
 	return 'dark';
 }
-export const theme = writable<'dark' | 'light'>(getInitialTheme());
 
-export function toggleTheme() {
-	theme.update(t => {
-		const next = t === 'dark' ? 'light' : 'dark';
-		if (browser) {
-			localStorage.setItem('mf-theme', next);
-			if (next === 'light') {
-				document.documentElement.setAttribute('data-theme', 'light');
-			} else {
-				document.documentElement.removeAttribute('data-theme');
-			}
+export const theme = writable<ThemeName>(getInitialTheme());
+
+export function setTheme(name: ThemeName) {
+	theme.set(name);
+	if (browser) {
+		localStorage.setItem('mf-theme', name);
+		if (name === 'dark') {
+			document.documentElement.removeAttribute('data-theme');
+		} else {
+			document.documentElement.setAttribute('data-theme', name);
 		}
-		return next;
-	});
+	}
 }
 
 export const notifications = writable<{ id: number; message: string; type: 'success' | 'error' | 'info' }[]>([]);

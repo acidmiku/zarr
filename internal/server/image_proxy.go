@@ -120,6 +120,10 @@ func (s *Server) handleImageProxy(w http.ResponseWriter, r *http.Request) {
 		"https://s4.anilist.co/",
 		"https://img.anili.st/",
 		"https://cdn.myanimelist.net/",
+		"https://coverartarchive.org/",
+		"https://archive.org/",
+		"https://lastfm.freetls.fastly.net/",
+		"https://lastfm-img2.akamaized.net/",
 	}
 	for _, prefix := range allowedPrefixes {
 		if strings.HasPrefix(imageURL, prefix) {

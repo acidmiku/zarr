@@ -13,20 +13,25 @@ type QualityProfile struct {
 	Language       string `json:"language"`
 	RejectPatterns string `json:"reject_patterns"`  // JSON array
 	UpgradeAllowed bool   `json:"upgrade_allowed"`
+	ProfileType    string `json:"profile_type"`
 }
 
 // Release represents a found release with computed score.
 type Release struct {
-	Title       string `json:"title"`
-	NZBURL      string `json:"nzb_url"`
-	Size        int64  `json:"size"`
-	Quality     string `json:"quality"`
-	Tags        []string `json:"tags"`
-	Score       int    `json:"score"`
-	Indexer     string `json:"indexer"`
-	Category    string `json:"category"`
-	Acceptable  bool   `json:"acceptable"`
-	RejectReason string `json:"reject_reason,omitempty"`
+	Title        string   `json:"title"`
+	NZBURL       string   `json:"nzb_url"`
+	Size         int64    `json:"size"`
+	Quality      string   `json:"quality"`
+	Tags         []string `json:"tags"`
+	Score        int      `json:"score"`
+	Indexer      string   `json:"indexer"`
+	Category     string   `json:"category"`
+	Acceptable   bool     `json:"acceptable"`
+	RejectReason string   `json:"reject_reason,omitempty"`
+	DownloadType string   `json:"download_type"`           // "nzb" or "torrent"
+	Seeders      int      `json:"seeders,omitempty"`
+	Leechers     int      `json:"leechers,omitempty"`
+	TopicID      int      `json:"topic_id,omitempty"`      // Rutracker topic ID
 }
 
 // ScoreRelease computes a score for a release against a quality profile.
@@ -57,8 +62,8 @@ func ScoreRelease(rel *Release, profile *QualityProfile) {
 		return
 	}
 
-	// Check language
-	if !LanguageAcceptable(rel.Title, profile.Language) {
+	// Check language (skip for music profiles with language "any")
+	if profile.Language != "any" && !LanguageAcceptable(rel.Title, profile.Language) {
 		rel.Acceptable = false
 		rel.RejectReason = "language mismatch"
 		return
@@ -74,6 +79,13 @@ func ScoreRelease(rel *Release, profile *QualityProfile) {
 	}
 
 	if qualityIndex == -1 {
+		// Music releases often lack quality info in the title — accept with low score
+		if profile.ProfileType == "music" && rel.Quality == "" {
+			rel.Quality = "unknown"
+			rel.Score = 1
+			rel.Acceptable = true
+			return
+		}
 		rel.Acceptable = false
 		rel.RejectReason = "quality not in profile"
 		return

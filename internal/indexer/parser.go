@@ -122,6 +122,33 @@ func LanguageAcceptable(releaseName, langPreset string) bool {
 	}
 }
 
+// Music quality patterns, ordered by preference.
+var musicQualityPatterns = []struct {
+	Name    string
+	Pattern *regexp.Regexp
+}{
+	{"flac-24bit", regexp.MustCompile(`(?i)(24.?bit.*flac|flac.*24.?bit|hi.?res.*flac|24bit)`)},
+	{"flac", regexp.MustCompile(`(?i)\bflac\b`)},
+	{"mp3-320", regexp.MustCompile(`(?i)(mp3.?320|320.?kbps|320k)`)},
+	{"mp3-v0", regexp.MustCompile(`(?i)(mp3.?v0|v0\b|vbr)`)},
+	{"aac-256", regexp.MustCompile(`(?i)(aac.?256|256.?aac|m4a)`)},
+	{"ogg", regexp.MustCompile(`(?i)\bogg\b`)},
+}
+
+// ParseMusicReleaseName extracts quality from a music release name.
+func ParseMusicReleaseName(name string) ParsedRelease {
+	result := ParsedRelease{}
+
+	for _, qp := range musicQualityPatterns {
+		if qp.Pattern.MatchString(name) {
+			result.Quality = qp.Name
+			break
+		}
+	}
+
+	return result
+}
+
 // MatchesRejectPatterns checks if a release name matches any reject patterns.
 func MatchesRejectPatterns(releaseName string, patterns []string) bool {
 	lower := strings.ToLower(releaseName)

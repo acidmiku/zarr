@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { page } from '$app/stores';
 	import { api } from '$lib/api';
-	import { setupComplete, notifications, theme, toggleTheme } from '$lib/stores/app';
+	import { setupComplete, notifications, theme, setTheme, THEMES } from '$lib/stores/app';
 	import SetupWizard from '$lib/components/SetupWizard.svelte';
 	import '../app.css';
 
@@ -10,6 +10,8 @@
 	let loaded = false;
 	let activityCount = 0;
 	let countInterval;
+	let themePickerOpen = false;
+	let themePickerEl;
 
 	onMount(async () => {
 		try {
@@ -55,17 +57,34 @@
 		countInterval = setInterval(updateActivityCount, 10000);
 	}
 
+	function handleClickOutside(e) {
+		if (themePickerOpen && themePickerEl && !themePickerEl.contains(e.target)) {
+			themePickerOpen = false;
+		}
+	}
+
+	function pickTheme(id) {
+		setTheme(id);
+		themePickerOpen = false;
+	}
+
+	$: darkThemes = THEMES.filter(t => t.group === 'dark');
+	$: lightThemes = THEMES.filter(t => t.group === 'light');
+
 	$: currentPath = $page.url.pathname;
 
 	const navItems = [
 		{ path: '/', label: 'Discover', icon: '⌕' },
 		{ path: '/library', label: 'Library', icon: '▤' },
+		{ path: '/music', label: 'Music', icon: '♫' },
 		{ path: '/ratings', label: 'Ratings', icon: '★' },
 		{ path: '/activity', label: 'Activity', icon: '↓' },
 		{ path: '/assistant', label: 'Assistant', icon: '✦' },
 		{ path: '/settings', label: 'Settings', icon: '⚙' }
 	];
 </script>
+
+<svelte:window on:click={handleClickOutside} />
 
 {#if !loaded}
 	<div class="loading-screen">
@@ -100,9 +119,33 @@
 					</a>
 				{/each}
 			</div>
-			<div class="sidebar-footer">
-				<button class="theme-toggle" on:click={toggleTheme} title="Toggle theme">
-					{$theme === 'dark' ? '☀' : '☽'}
+			<div class="sidebar-footer" bind:this={themePickerEl}>
+				{#if themePickerOpen}
+					<div class="theme-popover">
+						<div class="theme-group">
+							<span class="theme-group-label">Dark</span>
+							{#each darkThemes as t}
+								<button class="theme-option" class:active={$theme === t.id} on:click={() => pickTheme(t.id)}>
+									<span class="theme-swatch" style="background: {t.swatch}"></span>
+									<span class="theme-name">{t.label}</span>
+									{#if $theme === t.id}<span class="theme-check">✓</span>{/if}
+								</button>
+							{/each}
+						</div>
+						<div class="theme-group">
+							<span class="theme-group-label">Light</span>
+							{#each lightThemes as t}
+								<button class="theme-option" class:active={$theme === t.id} on:click={() => pickTheme(t.id)}>
+									<span class="theme-swatch" style="background: {t.swatch}"></span>
+									<span class="theme-name">{t.label}</span>
+									{#if $theme === t.id}<span class="theme-check">✓</span>{/if}
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+				<button class="theme-toggle" on:click={() => themePickerOpen = !themePickerOpen} title="Change theme">
+					◑
 				</button>
 			</div>
 		</nav>
@@ -293,6 +336,96 @@
 		color: var(--accent);
 		border-color: var(--accent);
 		box-shadow: var(--shadow-glow);
+	}
+
+	/* ---- Theme Popover ---- */
+	.theme-popover {
+		position: absolute;
+		bottom: calc(100% + 0.5rem);
+		left: 50%;
+		transform: translateX(-50%);
+		width: 180px;
+		background: var(--glass-bg);
+		backdrop-filter: blur(var(--glass-blur));
+		-webkit-backdrop-filter: blur(var(--glass-blur));
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
+		padding: 0.5rem;
+		box-shadow: var(--shadow-lg);
+		z-index: 200;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+		animation: popoverIn 0.15s ease;
+	}
+
+	@keyframes popoverIn {
+		from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+		to { opacity: 1; transform: translateX(-50%) translateY(0); }
+	}
+
+	.theme-group {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.theme-group + .theme-group {
+		border-top: 1px solid var(--border-subtle);
+		padding-top: 0.35rem;
+		margin-top: 0.2rem;
+	}
+
+	.theme-group-label {
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		color: var(--text-muted);
+		padding: 0.2rem 0.5rem;
+		font-family: var(--font-display);
+	}
+
+	.theme-option {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		padding: 0.4rem 0.5rem;
+		border: none;
+		background: transparent;
+		border-radius: var(--radius-sm);
+		color: var(--text-secondary);
+		font-size: 0.82rem;
+		font-family: var(--font-body);
+		cursor: pointer;
+		transition: all 0.15s ease;
+		width: 100%;
+		text-align: left;
+	}
+
+	.theme-option:hover {
+		background: var(--bg-hover);
+		color: var(--text-primary);
+	}
+
+	.theme-option.active {
+		color: var(--text-primary);
+	}
+
+	.theme-swatch {
+		width: 12px;
+		height: 12px;
+		border-radius: 50%;
+		flex-shrink: 0;
+		box-shadow: 0 0 0 1px rgba(255,255,255,0.1), 0 0 6px rgba(0,0,0,0.2);
+	}
+
+	.theme-name {
+		flex: 1;
+	}
+
+	.theme-check {
+		font-size: 0.75rem;
+		color: var(--accent);
 	}
 
 	/* ---- Content ---- */

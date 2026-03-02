@@ -9,12 +9,14 @@
 	let adding = false;
 
 	function typeLabel(t) {
+		if (t === 'music') return 'Music';
 		if (t === 'anime') return 'Anime';
 		if (t === 'movie') return 'Movie';
 		return 'Series';
 	}
 
 	function typeColor(t) {
+		if (t === 'music') return '#1db954';
 		if (t === 'anime') return 'var(--badge-anime)';
 		if (t === 'movie') return 'var(--badge-movie)';
 		return 'var(--badge-series)';
@@ -25,6 +27,30 @@
 		adding = true;
 
 		try {
+			if (rec.media_type === 'music') {
+				// Search MusicBrainz for the album
+				const results = await api.musicSearch(rec.title, 'album');
+				if (!results || results.length === 0) {
+					notify(`Could not find "${rec.title}" on MusicBrainz`, 'error');
+					adding = false;
+					return;
+				}
+				const album = results[0];
+				dispatch('showMusicDetail', {
+					id: album.id,
+					title: album.title,
+					artist: album.artist,
+					artist_id: album.artist_id,
+					year: album.year,
+					type: album.type,
+					cover_url: album.cover_url,
+					in_library: album.in_library,
+					library_id: album.library_id
+				});
+				adding = false;
+				return;
+			}
+
 			// Search for the title to get metadata
 			const results = await api.search(rec.title, rec.media_type);
 

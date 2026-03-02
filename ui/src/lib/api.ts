@@ -84,9 +84,29 @@ export const api = {
 	deleteRating: (tmdbId: number, type: string) =>
 		request('DELETE', `/ratings/${tmdbId}?type=${type}`),
 
+	// Music
+	musicSearch: (q: string, type = 'album') => request('GET', `/music/search?q=${encodeURIComponent(q)}&type=${type}`),
+	musicTrending: (page = 1) => request('GET', `/music/trending?page=${page}`),
+	musicArtist: (mbid: string) => request('GET', `/music/artist/${mbid}`),
+	musicAlbum: (rgid: string) => request('GET', `/music/album/${rgid}`),
+	addMusicToLibrary: (data: any) => request('POST', '/music/library', data),
+	getMusicLibrary: (status = 'all') => request('GET', `/music/library?status=${status}`),
+	getMusicArtists: () => request('GET', '/music/library/artists'),
+	getMusicLibraryItem: (id: number) => request('GET', `/music/library/${id}`),
+	deleteMusicLibraryItem: (id: number) => request('DELETE', `/music/library/${id}`),
+	searchMusicAlbum: (id: number) => request('POST', `/music/library/${id}/search`),
+	rateMusicAlbum: (id: number, data: { rating: number; comment: string }) =>
+		request('PUT', `/music/library/${id}/rate`, data),
+	getMusicReleases: (id: number) => request('GET', `/music/library/${id}/releases`),
+	grabMusicRelease: (data: { release_url: string; album_id: number }) =>
+		request('POST', '/music/releases/grab', data),
+	musicCoverUrl: (rgid: string) => `${BASE}/music/cover?rgid=${rgid}`,
+
 	// Settings
 	getSettings: () => request('GET', '/settings'),
 	updateSettings: (data: any) => request('PUT', '/settings', data),
+	testQBittorrent: (data?: { url?: string; username?: string; password?: string }) =>
+		request('POST', '/settings/test-qbittorrent', data || {}),
 
 	// System
 	getStatus: () => request('GET', '/system/status'),

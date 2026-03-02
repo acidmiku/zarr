@@ -26,6 +26,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Music settings
+	lastfmKey, _ := s.db.GetSetting("lastfm_api_key")
+
 	// AI settings
 	orKey, _ := s.db.GetSetting("openrouter_api_key")
 	orModel, _ := s.db.GetSetting("openrouter_model")
@@ -40,6 +43,24 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		aiPreset = "default"
 	}
 
+	// qBittorrent settings
+	qbtEnabled, _ := s.db.GetSetting("qbittorrent_enabled")
+	qbtURL, _ := s.db.GetSetting("qbittorrent_url")
+	if qbtURL == "" {
+		qbtURL = "http://qbittorrent:8080"
+	}
+	qbtUsername, _ := s.db.GetSetting("qbittorrent_username")
+	if qbtUsername == "" {
+		qbtUsername = "admin"
+	}
+	qbtPassword, _ := s.db.GetSetting("qbittorrent_password")
+	seedTimeStr, _ := s.db.GetSetting("torrent_seed_time_hours")
+	if seedTimeStr == "" {
+		seedTimeStr = "24"
+	}
+	removeAfterStr, _ := s.db.GetSetting("torrent_remove_after_seed")
+	removeAfterSeed := removeAfterStr != "false"
+
 	// Mask API keys for display
 	response := map[string]interface{}{
 		"proxy":          settings["proxy"],
@@ -50,6 +71,19 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		"sabnzbd_api_key": maskKey(settings["sabnzbd_api_key"]),
 		"sabnzbd_configured": settings["sabnzbd_api_key"] != "",
 		"setup_complete": settings["setup_complete"] == "true",
+
+		// Music settings
+		"lastfm_api_key":    maskKey(lastfmKey),
+		"lastfm_configured": lastfmKey != "",
+
+		// qBittorrent settings
+		"qbittorrent_enabled":    qbtEnabled == "true",
+		"qbittorrent_url":        qbtURL,
+		"qbittorrent_username":   qbtUsername,
+		"qbittorrent_password":   maskKey(qbtPassword),
+		"qbittorrent_configured": qbtPassword != "",
+		"torrent_seed_time_hours": seedTimeStr,
+		"torrent_remove_after_seed": removeAfterSeed,
 
 		// AI settings
 		"openrouter_api_key":    maskKey(orKey),
@@ -72,6 +106,17 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		SabURL     *string `json:"sabnzbd_url"`
 		SabKey     *string `json:"sabnzbd_api_key"`
 		SetupDone  *bool   `json:"setup_complete"`
+
+		// Music settings
+		LastFMKey     *string `json:"lastfm_api_key"`
+
+		// qBittorrent settings
+		QBTEnabled       *bool   `json:"qbittorrent_enabled"`
+		QBTURL           *string `json:"qbittorrent_url"`
+		QBTUsername      *string `json:"qbittorrent_username"`
+		QBTPassword      *string `json:"qbittorrent_password"`
+		SeedTimeHours    *string `json:"torrent_seed_time_hours"`
+		RemoveAfterSeed  *bool   `json:"torrent_remove_after_seed"`
 
 		// AI settings
 		OpenRouterKey    *string `json:"openrouter_api_key"`
@@ -104,6 +149,39 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		s.db.SetSetting("setup_complete", "true")
 	}
 
+	// Music settings
+	if req.LastFMKey != nil {
+		s.db.SetSetting("lastfm_api_key", *req.LastFMKey)
+	}
+
+	// qBittorrent settings
+	if req.QBTEnabled != nil {
+		if *req.QBTEnabled {
+			s.db.SetSetting("qbittorrent_enabled", "true")
+		} else {
+			s.db.SetSetting("qbittorrent_enabled", "false")
+		}
+	}
+	if req.QBTURL != nil {
+		s.db.SetSetting("qbittorrent_url", *req.QBTURL)
+	}
+	if req.QBTUsername != nil {
+		s.db.SetSetting("qbittorrent_username", *req.QBTUsername)
+	}
+	if req.QBTPassword != nil {
+		s.db.SetSetting("qbittorrent_password", *req.QBTPassword)
+	}
+	if req.SeedTimeHours != nil {
+		s.db.SetSetting("torrent_seed_time_hours", *req.SeedTimeHours)
+	}
+	if req.RemoveAfterSeed != nil {
+		if *req.RemoveAfterSeed {
+			s.db.SetSetting("torrent_remove_after_seed", "true")
+		} else {
+			s.db.SetSetting("torrent_remove_after_seed", "false")
+		}
+	}
+
 	// AI settings
 	reinitAI := false
 	if req.OpenRouterKey != nil {
@@ -132,10 +210,21 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	s.processor.UpdateMediaRoot(s.cfg.MediaRoot)
 	s.scanner.UpdateMediaRoot(s.cfg.MediaRoot)
 
+	// Update qBittorrent client
+	if s.qbt != nil {
+		s.qbt.UpdateConfig(s.cfg.QBTURL, s.cfg.QBTUsername, s.cfg.QBTPassword)
+	}
+
 	// Reinitialize TMDB client if the key was set/changed
 	if s.cfg.TMDBApiKey != "" && (s.tmdb == nil || req.TMDBKey != nil) {
 		s.tmdb = metadata.NewTMDBClient(s.proxyClient, s.cfg.TMDBApiKey)
 		slog.Info("TMDB client initialized via settings update")
+	}
+
+	// Reinitialize Last.fm client if key was set/changed
+	if s.cfg.LastFMApiKey != "" && (s.lastfm == nil || req.LastFMKey != nil) {
+		s.lastfm = metadata.NewLastFMClient(s.proxyClient, s.cfg.LastFMApiKey, s.db, s.cfg.ConfigDir)
+		slog.Info("Last.fm client initialized via settings update")
 	}
 
 	// Reinitialize AI clients if keys changed
@@ -175,6 +264,45 @@ func (s *Server) handleTestOpenRouter(w http.ResponseWriter, r *http.Request) {
 		errStr := err.Error()
 		// Auth failures typically contain 401 or "unauthorized"
 		writeJSON(w, 200, map[string]interface{}{"success": false, "error": errStr})
+		return
+	}
+
+	writeJSON(w, 200, map[string]interface{}{"success": true})
+}
+
+// handleTestQBittorrent tests the qBittorrent connection.
+func (s *Server) handleTestQBittorrent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if s.qbt == nil {
+		writeJSON(w, 200, map[string]interface{}{"success": false, "error": "qBittorrent client not initialized"})
+		return
+	}
+
+	// Temporarily update config for the test if values provided
+	if req.URL != "" || req.Username != "" || req.Password != "" {
+		url := req.URL
+		if url == "" {
+			url = s.cfg.QBTURL
+		}
+		username := req.Username
+		if username == "" {
+			username = s.cfg.QBTUsername
+		}
+		password := req.Password
+		if password == "" {
+			password = s.cfg.QBTPassword
+		}
+		s.qbt.UpdateConfig(url, username, password)
+	}
+
+	if err := s.qbt.TestConnection(); err != nil {
+		writeJSON(w, 200, map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
 

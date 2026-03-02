@@ -15,7 +15,7 @@ func ToolDefs(braveAvailable bool) []Tool {
 			Type: "function",
 			Function: ToolFunction{
 				Name:        "show_recommendations",
-				Description: "Display recommendation cards to the user with posters and personalized explanations. Use this whenever you want to suggest specific titles for the user to watch. Shows visual cards in the UI.",
+				Description: "Display recommendation cards to the user with posters and personalized explanations. Use this whenever you want to suggest specific titles for the user to watch or listen to. Shows visual cards in the UI.",
 				Parameters: json.RawMessage(`{
 					"type": "object",
 					"properties": {
@@ -26,8 +26,9 @@ func ToolDefs(braveAvailable bool) []Tool {
 								"properties": {
 									"mal_id": {"type": "integer", "description": "MyAnimeList ID of the anime/movie. Use search_mal first to find this."},
 									"title": {"type": "string", "description": "Title of the recommendation"},
-									"media_type": {"type": "string", "enum": ["anime", "movie", "series"], "description": "Type of media"},
-									"reason": {"type": "string", "description": "2-3 sentence personalized explanation of why the user would enjoy this, referencing their taste/ratings where relevant"}
+									"media_type": {"type": "string", "enum": ["anime", "movie", "series", "music"], "description": "Type of media"},
+									"reason": {"type": "string", "description": "2-3 sentence personalized explanation of why the user would enjoy this, referencing their taste/ratings where relevant"},
+									"release_group_id": {"type": "string", "description": "MusicBrainz release group ID for music recommendations. Use search_music first to find this."}
 								},
 								"required": ["title", "reason", "media_type"]
 							},
@@ -69,7 +70,7 @@ func ToolDefs(braveAvailable bool) []Tool {
 					"type": "object",
 					"properties": {
 						"min_rating": {"type": "integer", "description": "Minimum rating to filter (1-5), default 1"},
-						"type": {"type": "string", "enum": ["all", "movie", "series", "anime"], "description": "Filter by media type, default all"}
+						"type": {"type": "string", "enum": ["all", "movie", "series", "anime", "music"], "description": "Filter by media type, default all"}
 					}
 				}`),
 			},
@@ -79,8 +80,25 @@ func ToolDefs(braveAvailable bool) []Tool {
 	tools = append(tools, Tool{
 		Type: "function",
 		Function: ToolFunction{
+			Name:        "search_music",
+			Description: "Search MusicBrainz for albums and artists. Use this to find music to recommend or look up album details. Returns release_group_id which can be used in show_recommendations for cover art.",
+			Parameters: json.RawMessage(`{
+				"type": "object",
+				"properties": {
+					"query": {"type": "string", "description": "Search text (album title, artist name, keywords)"},
+					"type": {"type": "string", "enum": ["album", "artist"], "description": "Type of search. Default 'album'."},
+					"limit": {"type": "integer", "description": "Max results (1-25), default 10"}
+				},
+				"required": ["query"]
+			}`),
+		},
+	})
+
+	tools = append(tools, Tool{
+		Type: "function",
+		Function: ToolFunction{
 			Name:        "save_ratings",
-			Description: "Save user ratings for titles they've already watched. Use this when the user mentions they've seen something, provides a list of watched titles, or wants to rate something they've already seen. Each item is looked up on TMDB automatically — you only need to provide the title.",
+			Description: "Save user ratings for titles they've already watched or listened to. Use this when the user mentions they've seen/heard something, provides a list of watched/listened content, or wants to rate something. Each item is looked up on TMDB (or MusicBrainz for music) automatically — you only need to provide the title.",
 			Parameters: json.RawMessage(`{
 				"type": "object",
 				"properties": {
@@ -89,8 +107,8 @@ func ToolDefs(braveAvailable bool) []Tool {
 						"items": {
 							"type": "object",
 							"properties": {
-								"title": {"type": "string", "description": "Title of the movie/series/anime"},
-								"media_type": {"type": "string", "enum": ["movie", "series"], "description": "Type of media. Use 'series' for both TV shows and anime."},
+								"title": {"type": "string", "description": "Title of the movie/series/anime/album. For music, use 'Artist - Album' format."},
+								"media_type": {"type": "string", "enum": ["movie", "series", "music"], "description": "Type of media. Use 'series' for both TV shows and anime. Use 'music' for albums."},
 								"score": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Rating 1-5 stars. Default 5 if user doesn't specify. Infer from sentiment: loved=5, great=4, ok=3, meh=2, bad=1."},
 								"comment": {"type": "string", "description": "Optional user comment or note about the title"},
 								"anime": {"type": "boolean", "description": "Whether this is anime. Default false."}
@@ -127,20 +145,22 @@ func ToolDefs(braveAvailable bool) []Tool {
 
 // Recommendation is a single recommendation from the AI.
 type Recommendation struct {
-	MalID     int    `json:"mal_id,omitempty"`
-	Title     string `json:"title"`
-	MediaType string `json:"media_type"`
-	Reason    string `json:"reason"`
-	PosterURL string `json:"poster_url,omitempty"`
-	Score     float64 `json:"score,omitempty"`
+	MalID          int    `json:"mal_id,omitempty"`
+	Title          string `json:"title"`
+	MediaType      string `json:"media_type"`
+	Reason         string `json:"reason"`
+	PosterURL      string `json:"poster_url,omitempty"`
+	Score          float64 `json:"score,omitempty"`
+	ReleaseGroupID string `json:"release_group_id,omitempty"`
 }
 
 // ToolExecutor handles tool call execution.
 type ToolExecutor struct {
-	Jikan *JikanClient
-	Brave *BraveClient
-	DB    *sql.DB
-	TMDB  *metadata.TMDBClient
+	Jikan      *JikanClient
+	Brave      *BraveClient
+	DB         *sql.DB
+	TMDB       *metadata.TMDBClient
+	MusicBrainz *metadata.MusicBrainzClient
 }
 
 // ExecuteTool runs a tool call and returns the result string plus any recommendations to emit.
@@ -150,6 +170,8 @@ func (e *ToolExecutor) ExecuteTool(name, argsJSON string) (result string, recs [
 		return e.execShowRecommendations(argsJSON)
 	case "search_mal":
 		return e.execSearchMAL(argsJSON)
+	case "search_music":
+		return e.execSearchMusic(argsJSON)
 	case "web_search":
 		return e.execWebSearch(argsJSON)
 	case "get_user_ratings":
@@ -164,10 +186,11 @@ func (e *ToolExecutor) ExecuteTool(name, argsJSON string) (result string, recs [
 func (e *ToolExecutor) execShowRecommendations(argsJSON string) (string, []Recommendation, error) {
 	var args struct {
 		Recommendations []struct {
-			MalID     int    `json:"mal_id"`
-			Title     string `json:"title"`
-			MediaType string `json:"media_type"`
-			Reason    string `json:"reason"`
+			MalID          int    `json:"mal_id"`
+			Title          string `json:"title"`
+			MediaType      string `json:"media_type"`
+			Reason         string `json:"reason"`
+			ReleaseGroupID string `json:"release_group_id"`
 		} `json:"recommendations"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
@@ -177,14 +200,17 @@ func (e *ToolExecutor) execShowRecommendations(argsJSON string) (string, []Recom
 	var recs []Recommendation
 	for _, r := range args.Recommendations {
 		rec := Recommendation{
-			MalID:     r.MalID,
-			Title:     r.Title,
-			MediaType: r.MediaType,
-			Reason:    r.Reason,
+			MalID:          r.MalID,
+			Title:          r.Title,
+			MediaType:      r.MediaType,
+			Reason:         r.Reason,
+			ReleaseGroupID: r.ReleaseGroupID,
 		}
 
-		// Set poster URL for lazy loading via image proxy (no API call here to avoid rate limits)
-		if r.MalID > 0 {
+		// Set poster URL for lazy loading
+		if r.MediaType == "music" && r.ReleaseGroupID != "" {
+			rec.PosterURL = fmt.Sprintf("/api/music/cover?rgid=%s", r.ReleaseGroupID)
+		} else if r.MalID > 0 {
 			rec.PosterURL = fmt.Sprintf("/api/image/jikan/%d", r.MalID)
 		}
 
@@ -254,6 +280,78 @@ func (e *ToolExecutor) execSearchMAL(argsJSON string) (string, []Recommendation,
 	return sb.String(), nil, nil
 }
 
+func (e *ToolExecutor) execSearchMusic(argsJSON string) (string, []Recommendation, error) {
+	if e.MusicBrainz == nil {
+		return "MusicBrainz client not available.", nil, nil
+	}
+
+	var args struct {
+		Query string `json:"query"`
+		Type  string `json:"type"`
+		Limit int    `json:"limit"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return "Failed to parse search_music arguments", nil, nil
+	}
+	if args.Type == "" {
+		args.Type = "album"
+	}
+	if args.Limit < 1 || args.Limit > 25 {
+		args.Limit = 10
+	}
+
+	var sb strings.Builder
+
+	if args.Type == "artist" {
+		result, err := e.MusicBrainz.SearchArtists(args.Query)
+		if err != nil {
+			return fmt.Sprintf("MusicBrainz search error: %s", err.Error()), nil, nil
+		}
+		if len(result.Artists) == 0 {
+			return "No artists found.", nil, nil
+		}
+		limit := args.Limit
+		if limit > len(result.Artists) {
+			limit = len(result.Artists)
+		}
+		sb.WriteString(fmt.Sprintf("Found %d artists:\n\n", limit))
+		for _, a := range result.Artists[:limit] {
+			sb.WriteString(fmt.Sprintf("- **%s** (MBID: %s)\n", a.Name, a.ID))
+			if a.Type != "" {
+				sb.WriteString(fmt.Sprintf("  Type: %s", a.Type))
+			}
+			if a.Country != "" {
+				sb.WriteString(fmt.Sprintf(" | Country: %s", a.Country))
+			}
+			sb.WriteByte('\n')
+		}
+	} else {
+		result, err := e.MusicBrainz.SearchReleaseGroups(args.Query)
+		if err != nil {
+			return fmt.Sprintf("MusicBrainz search error: %s", err.Error()), nil, nil
+		}
+		if len(result.ReleaseGroups) == 0 {
+			return "No albums found.", nil, nil
+		}
+		limit := args.Limit
+		if limit > len(result.ReleaseGroups) {
+			limit = len(result.ReleaseGroups)
+		}
+		sb.WriteString(fmt.Sprintf("Found %d albums:\n\n", limit))
+		for _, rg := range result.ReleaseGroups[:limit] {
+			artistName := ""
+			if len(rg.ArtistCredit) > 0 {
+				artistName = rg.ArtistCredit[0].Artist.Name
+			}
+			sb.WriteString(fmt.Sprintf("- **%s** by %s (Release Group ID: %s)\n",
+				rg.Title, artistName, rg.ID))
+			sb.WriteString(fmt.Sprintf("  Type: %s | Year: %s\n", rg.PrimaryType, rg.FirstRelease))
+		}
+	}
+
+	return sb.String(), nil, nil
+}
+
 func (e *ToolExecutor) execWebSearch(argsJSON string) (string, []Recommendation, error) {
 	if e.Brave == nil || e.Brave.apiKey == "" {
 		return "Web search is not available. The user hasn't configured a Brave API key. Suggest they add one in Settings, or work with your existing knowledge.", nil, nil
@@ -302,42 +400,72 @@ func (e *ToolExecutor) execGetUserRatings(argsJSON string) (string, []Recommenda
 		args.Type = "all"
 	}
 
-	query := `SELECT r.tmdb_id, r.media_type, r.rating, r.comment,
-		COALESCE(m.title, 'Unknown Title') as title
-		FROM user_ratings r
-		LEFT JOIN media_items m ON m.tmdb_id = r.tmdb_id AND m.type = r.media_type
-		WHERE r.rating >= ?`
-	qargs := []interface{}{args.MinRating}
-
-	if args.Type != "all" {
-		query += " AND r.media_type = ?"
-		qargs = append(qargs, args.Type)
-	}
-	query += " ORDER BY r.rating DESC, r.updated_at DESC"
-
-	rows, err := e.DB.Query(query, qargs...)
-	if err != nil {
-		return fmt.Sprintf("Database error: %s", err.Error()), nil, nil
-	}
-	defer rows.Close()
-
 	var sb strings.Builder
 	sb.WriteString("User ratings:\n\n")
 	count := 0
-	for rows.Next() {
-		var tmdbID, rating int
-		var mediaType, title string
-		var comment sql.NullString
-		if err := rows.Scan(&tmdbID, &mediaType, &rating, &comment, &title); err != nil {
-			continue
+
+	// Query movie/series/anime ratings (skip when type is "music")
+	if args.Type != "music" {
+		query := `SELECT r.tmdb_id, r.media_type, r.rating, r.comment,
+			COALESCE(m.title, 'Unknown Title') as title
+			FROM user_ratings r
+			LEFT JOIN media_items m ON m.tmdb_id = r.tmdb_id AND m.type = r.media_type
+			WHERE r.rating >= ?`
+		qargs := []interface{}{args.MinRating}
+
+		if args.Type != "all" {
+			query += " AND r.media_type = ?"
+			qargs = append(qargs, args.Type)
 		}
-		stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
-		commentStr := ""
-		if comment.Valid && comment.String != "" {
-			commentStr = fmt.Sprintf(` — "%s"`, comment.String)
+		query += " ORDER BY r.rating DESC, r.updated_at DESC"
+
+		rows, err := e.DB.Query(query, qargs...)
+		if err != nil {
+			return fmt.Sprintf("Database error: %s", err.Error()), nil, nil
 		}
-		sb.WriteString(fmt.Sprintf("- %s (%s): %s%s\n", title, mediaType, stars, commentStr))
-		count++
+		defer rows.Close()
+
+		for rows.Next() {
+			var tmdbID, rating int
+			var mediaType, title string
+			var comment sql.NullString
+			if err := rows.Scan(&tmdbID, &mediaType, &rating, &comment, &title); err != nil {
+				continue
+			}
+			stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
+			commentStr := ""
+			if comment.Valid && comment.String != "" {
+				commentStr = fmt.Sprintf(` — "%s"`, comment.String)
+			}
+			sb.WriteString(fmt.Sprintf("- %s (%s): %s%s\n", title, mediaType, stars, commentStr))
+			count++
+		}
+	}
+
+	// Query music ratings (when type is "all" or "music")
+	if args.Type == "all" || args.Type == "music" {
+		musicRows, err := e.DB.Query(`SELECT a.title, ar.name, a.rating, a.rating_comment
+			FROM albums a JOIN artists ar ON a.artist_id = ar.id
+			WHERE a.rating IS NOT NULL AND a.rating >= ?
+			ORDER BY a.rating DESC`, args.MinRating)
+		if err == nil {
+			defer musicRows.Close()
+			for musicRows.Next() {
+				var title, artistName string
+				var rating int
+				var comment sql.NullString
+				if err := musicRows.Scan(&title, &artistName, &rating, &comment); err != nil {
+					continue
+				}
+				stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
+				commentStr := ""
+				if comment.Valid && comment.String != "" {
+					commentStr = fmt.Sprintf(` — "%s"`, comment.String)
+				}
+				sb.WriteString(fmt.Sprintf("- %s - %s (music): %s%s\n", artistName, title, stars, commentStr))
+				count++
+			}
+		}
 	}
 
 	if count == 0 {
@@ -365,10 +493,6 @@ func (e *ToolExecutor) execSaveRatings(argsJSON string) (string, []Recommendatio
 		return "No ratings provided.", nil, nil
 	}
 
-	if e.TMDB == nil {
-		return "TMDB client not available. Cannot look up titles.", nil, nil
-	}
-
 	var saved []string
 	var failed []string
 
@@ -376,19 +500,93 @@ func (e *ToolExecutor) execSaveRatings(argsJSON string) (string, []Recommendatio
 		if r.Title == "" {
 			continue
 		}
-		if r.MediaType != "movie" && r.MediaType != "series" {
+		if r.MediaType != "movie" && r.MediaType != "series" && r.MediaType != "music" {
 			r.MediaType = "series"
 		}
 		if r.Score < 1 || r.Score > 5 {
 			r.Score = 5
 		}
 
-		// Search TMDB for the title
+		if r.MediaType == "music" {
+			// Search MusicBrainz for the album
+			if e.MusicBrainz == nil {
+				failed = append(failed, r.Title)
+				continue
+			}
+
+			result, err := e.MusicBrainz.SearchReleaseGroups(r.Title)
+			if err != nil || len(result.ReleaseGroups) == 0 {
+				failed = append(failed, r.Title)
+				continue
+			}
+
+			rg := result.ReleaseGroups[0]
+			artistName := ""
+			artistMBID := ""
+			if len(rg.ArtistCredit) > 0 {
+				artistName = rg.ArtistCredit[0].Artist.Name
+				artistMBID = rg.ArtistCredit[0].Artist.ID
+			}
+			albumTitle := rg.Title
+			rgID := rg.ID
+			imageURL := fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", rgID)
+			year := 0
+			if len(rg.FirstRelease) >= 4 {
+				fmt.Sscanf(rg.FirstRelease[:4], "%d", &year)
+			}
+
+			// Find or create artist
+			var artistID int
+			err = e.DB.QueryRow(`SELECT id FROM artists WHERE mbid = ?`, artistMBID).Scan(&artistID)
+			if err != nil {
+				res, err := e.DB.Exec(`INSERT INTO artists (mbid, name, sort_name) VALUES (?, ?, ?)`,
+					artistMBID, artistName, artistName)
+				if err != nil {
+					failed = append(failed, r.Title)
+					continue
+				}
+				id, _ := res.LastInsertId()
+				artistID = int(id)
+			}
+
+			// Find or create album
+			var albumID int
+			err = e.DB.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, rgID).Scan(&albumID)
+			if err != nil {
+				res, err := e.DB.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, image_url, status)
+					VALUES (?, ?, ?, ?, ?, ?, 'wanted')`,
+					artistID, rgID, albumTitle, year, rg.PrimaryType, imageURL)
+				if err != nil {
+					failed = append(failed, r.Title)
+					continue
+				}
+				id, _ := res.LastInsertId()
+				albumID = int(id)
+			}
+
+			// Set rating on album
+			_, err = e.DB.Exec(`UPDATE albums SET rating = ?, rating_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+				r.Score, r.Comment, albumID)
+			if err != nil {
+				failed = append(failed, r.Title)
+				continue
+			}
+
+			stars := strings.Repeat("★", r.Score) + strings.Repeat("☆", 5-r.Score)
+			saved = append(saved, fmt.Sprintf("%s - %s %s", artistName, albumTitle, stars))
+			continue
+		}
+
+		// Search TMDB for movies/series
 		var tmdbID int
 		var resolvedTitle, posterURL string
 		var year int
 
 		if r.MediaType == "movie" {
+			if e.TMDB == nil {
+				failed = append(failed, r.Title)
+				continue
+			}
 			result, err := e.TMDB.SearchMovies(r.Title)
 			if err != nil || len(result.Results) == 0 {
 				failed = append(failed, r.Title)
@@ -404,6 +602,10 @@ func (e *ToolExecutor) execSaveRatings(argsJSON string) (string, []Recommendatio
 				fmt.Sscanf(entry.ReleaseDate[:4], "%d", &year)
 			}
 		} else {
+			if e.TMDB == nil {
+				failed = append(failed, r.Title)
+				continue
+			}
 			result, err := e.TMDB.SearchTV(r.Title)
 			if err != nil || len(result.Results) == 0 {
 				failed = append(failed, r.Title)

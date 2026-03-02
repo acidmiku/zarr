@@ -67,6 +67,9 @@
 								{#if act.media_title}
 									<span class="act-media">{act.media_title}</span>
 								{/if}
+								{#if act.download_type}
+									<span class="act-type-badge" class:torrent={act.download_type === 'torrent'}>{act.download_type === 'torrent' ? 'Torrent' : 'NZB'}</span>
+								{/if}
 							</div>
 							{#if act.details}
 								<div class="act-details">{act.details}</div>
@@ -186,6 +189,21 @@
 
 	.act-media {
 		color: var(--accent);
+	}
+
+	.act-type-badge {
+		background: var(--info-bg);
+		color: var(--info);
+		padding: 1px 5px;
+		border-radius: 3px;
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+	}
+
+	.act-type-badge.torrent {
+		background: var(--success-bg);
+		color: var(--success);
 	}
 
 	.act-details {

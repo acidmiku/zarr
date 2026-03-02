@@ -109,10 +109,15 @@
 	async function grabRelease(rel) {
 		error = '';
 		try {
-			await api.grabRelease({
+			const data = {
 				release_url: rel.nzb_url,
 				media_item_id: id
-			});
+			};
+			if (rel.download_type === 'torrent') {
+				data.download_type = 'torrent';
+				data.topic_id = rel.topic_id;
+			}
+			await api.grabRelease(data);
 			notify('Release grabbed!', 'success');
 			showReleases = false;
 		} catch (e) {
@@ -340,9 +345,13 @@
 								<div class="rel-info">
 									<div class="rel-title">{rel.title}</div>
 									<div class="rel-meta">
+										<span class="rel-type-badge" class:torrent={rel.download_type === 'torrent'}>{rel.download_type === 'torrent' ? 'Torrent' : 'NZB'}</span>
 										{#if rel.quality}<span class="rel-quality">{rel.quality}</span>{/if}
 										{#if rel.indexer}<span>via {rel.indexer}</span>{/if}
 										{#if rel.size}<span>{(rel.size / 1024 / 1024 / 1024).toFixed(1)} GB</span>{/if}
+										{#if rel.download_type === 'torrent' && rel.seeders != null}
+											<span class="rel-seeders">{rel.seeders}S / {rel.leechers || 0}L</span>
+										{/if}
 										{#each rel.tags || [] as tag}<span class="rel-tag">{tag}</span>{/each}
 									</div>
 									{#if !rel.acceptable}
@@ -672,6 +681,23 @@
 	.rel-quality {
 		color: var(--accent);
 	}
+
+	.rel-type-badge {
+		background: var(--info-bg);
+		color: var(--info);
+		padding: 1px 6px;
+		border-radius: 3px;
+		font-size: 0.7rem;
+		font-weight: 600;
+		text-transform: uppercase;
+	}
+
+	.rel-type-badge.torrent {
+		background: var(--success-bg);
+		color: var(--success);
+	}
+
+	.rel-seeders { color: var(--success); font-weight: 500; }
 
 	.rel-tag {
 		background: var(--bg-elevated);

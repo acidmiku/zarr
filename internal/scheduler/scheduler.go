@@ -18,20 +18,25 @@ import (
 	"mediaforge/internal/indexer"
 	"mediaforge/internal/metadata"
 	"mediaforge/internal/postprocess"
+	"mediaforge/internal/qbt"
+	"mediaforge/internal/rutracker"
 )
 
 // Scheduler runs periodic background tasks.
 type Scheduler struct {
-	db        *database.DB
-	cfg       *config.Config
-	grabberSvc *grabber.Grabber
-	newznab   *indexer.NewznabClient
-	tmdb      *metadata.TMDBClient
-	anilist   *metadata.AniListClient
-	mapping   *metadata.Mapping
-	processor *postprocess.Processor
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
+	db          *database.DB
+	cfg         *config.Config
+	grabberSvc  *grabber.Grabber
+	newznab     *indexer.NewznabClient
+	tmdb        *metadata.TMDBClient
+	anilist     *metadata.AniListClient
+	mapping     *metadata.Mapping
+	processor   *postprocess.Processor
+	musicbrainz *metadata.MusicBrainzClient
+	qbt         *qbt.Client
+	rtClient    *rutracker.Client
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 func New(
@@ -43,16 +48,22 @@ func New(
 	a *metadata.AniListClient,
 	m *metadata.Mapping,
 	p *postprocess.Processor,
+	mb *metadata.MusicBrainzClient,
+	qbtClient *qbt.Client,
+	rtClient *rutracker.Client,
 ) *Scheduler {
 	return &Scheduler{
-		db:        db,
-		cfg:       cfg,
-		grabberSvc: g,
-		newznab:   n,
-		tmdb:      t,
-		anilist:   a,
-		mapping:   m,
-		processor: p,
+		db:          db,
+		cfg:         cfg,
+		grabberSvc:  g,
+		newznab:     n,
+		tmdb:        t,
+		anilist:     a,
+		mapping:     m,
+		processor:   p,
+		musicbrainz: mb,
+		qbt:         qbtClient,
+		rtClient:    rtClient,
 	}
 }
 
@@ -65,8 +76,11 @@ func (s *Scheduler) Start() {
 	s.retryFailedDownloads()
 
 	s.runTask(ctx, "download-poll", 10*time.Second, s.pollDownloads)
+	s.runTask(ctx, "torrent-poll", 15*time.Second, s.pollTorrentDownloads)
 	s.runTask(ctx, "rss-sync", 15*time.Minute, s.rssSync)
 	s.runTask(ctx, "episode-check", 30*time.Minute, s.checkEpisodeAirDates)
+	s.runTask(ctx, "music-search", 30*time.Minute, s.searchWantedAlbums)
+	s.runTask(ctx, "seed-cleanup", 30*time.Minute, s.cleanupSeededTorrents)
 	s.runTask(ctx, "metadata-refresh", 24*time.Hour, s.refreshMetadata)
 	s.runTask(ctx, "mapping-refresh", 24*time.Hour, s.refreshMapping)
 
@@ -199,6 +213,13 @@ func (s *Scheduler) pollDownloads() {
 			if err := s.processor.Process(dlID, storagePath); err != nil {
 				slog.Error("post-processing failed", "download_id", dlID, "error", err)
 				s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ?`, dlID)
+				// Reset music album to wanted on post-processing failure
+				var ppAlbumID sql.NullInt64
+				s.db.QueryRow(`SELECT album_id FROM downloads WHERE id = ?`, dlID).Scan(&ppAlbumID)
+				if ppAlbumID.Valid && ppAlbumID.Int64 > 0 {
+					s.db.Exec(`UPDATE albums SET status = 'wanted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'downloading'`,
+						ppAlbumID.Int64)
+				}
 			} else {
 				// Clean up download dir
 				postprocess.CleanDownloadDir(storagePath)
@@ -207,10 +228,21 @@ func (s *Scheduler) pollDownloads() {
 			slog.Warn("download failed", "nzo_id", slot.NzoID, "message", slot.FailMessage)
 			s.db.Exec(`UPDATE downloads SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, dlID)
 
-			var mediaItemID int
-			s.db.QueryRow(`SELECT media_item_id FROM downloads WHERE id = ?`, dlID).Scan(&mediaItemID)
-			s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
-				mediaItemID, slot.FailMessage)
+			var mediaItemID sql.NullInt64
+			var albumID sql.NullInt64
+			s.db.QueryRow(`SELECT media_item_id, album_id FROM downloads WHERE id = ?`, dlID).Scan(&mediaItemID, &albumID)
+
+			if albumID.Valid && albumID.Int64 > 0 {
+				// Music download failed — reset album to wanted so scheduler retries
+				s.db.Exec(`UPDATE albums SET status = 'wanted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'downloading'`,
+					albumID.Int64)
+				s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'failed', ?)`,
+					albumID.Int64, slot.FailMessage)
+				slog.Warn("music download failed, album reset to wanted", "album_id", albumID.Int64)
+			} else if mediaItemID.Valid {
+				s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
+					mediaItemID.Int64, slot.FailMessage)
+			}
 		}
 	}
 }
@@ -308,49 +340,230 @@ func (s *Scheduler) refreshMapping() {
 	}
 }
 
-func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdbID, season, episode int, absNum sql.NullInt64, anime bool, profileID int) {
-	// Load indexers
-	idxRows, err := s.db.Query(`SELECT id, name, url, api_key, priority, enabled FROM indexers WHERE enabled = TRUE ORDER BY priority DESC`)
+// searchWantedAlbums searches for all albums with "wanted" status.
+func (s *Scheduler) searchWantedAlbums() {
+	rows, err := s.db.Query(`SELECT al.id, a.name, al.title, al.year, al.quality_profile_id
+		FROM albums al JOIN artists a ON al.artist_id = a.id
+		WHERE al.status = 'wanted'`)
 	if err != nil {
 		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var albumID, year, profileID int
+		var artist, title string
+		if err := rows.Scan(&albumID, &artist, &title, &year, &profileID); err != nil {
+			continue
+		}
+		s.searchAndGrabAlbum(albumID, artist, title, year, profileID)
+	}
+}
+
+// searchAndGrabAlbum searches indexers for a specific album and grabs the best release.
+func (s *Scheduler) searchAndGrabAlbum(albumID int, artist, title string, year, profileID int) {
+	allIndexers := s.loadIndexers()
+	if len(allIndexers) == 0 {
+		return
+	}
+
+	profile := s.loadProfile(profileID)
+	if profile == nil {
+		return
+	}
+
+	// Newznab search
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "music")
+	releases := s.newznab.SearchMusic(newznabIdxs, artist, title, year)
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	// Rutracker search
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "music")
+	if len(rtIndexers) > 0 && s.rtClient != nil {
+		query := fmt.Sprintf("%s %s", artist, title)
+		forumIDs := rutracker.DefaultForumIDs["music"]
+		for _, idx := range rtIndexers {
+			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
+			if err != nil {
+				slog.Warn("rutracker music search failed", "indexer", idx.Name, "error", err)
+				continue
+			}
+			for _, r := range results {
+				parsed := indexer.ParseMusicReleaseName(r.Title)
+				releases = append(releases, indexer.Release{
+					Title:        r.Title,
+					Size:         r.Size,
+					Quality:      parsed.Quality,
+					Tags:         parsed.Tags,
+					Indexer:      idx.Name,
+					DownloadType: "torrent",
+					Seeders:      r.Seeders,
+					Leechers:     r.Leechers,
+					TopicID:      r.TopicID,
+				})
+			}
+		}
+	}
+
+	for i := range releases {
+		indexer.ScoreRelease(&releases[i], profile)
+	}
+
+	best := indexer.BestRelease(releases)
+	if best == nil {
+		return
+	}
+
+	// Check existing download score
+	var existingScore sql.NullInt64
+	s.db.QueryRow(`SELECT score FROM downloads WHERE album_id = ? AND status = 'imported' ORDER BY score DESC LIMIT 1`,
+		albumID).Scan(&existingScore)
+	if existingScore.Valid && !indexer.ShouldUpgrade(best.Score, int(existingScore.Int64), profile.UpgradeAllowed) {
+		return
+	}
+
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
+		if len(rtIdxs) > 0 && s.rtClient != nil && s.qbt != nil {
+			idx := rtIdxs[0]
+			torrentData, err := s.rtClient.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				slog.Error("torrent download failed", "title", best.Title, "error", err)
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (album_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, 'torrent')`,
+				albumID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE albums SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, albumID)
+			s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'grabbed', ?)`,
+				albumID, fmt.Sprintf("Grabbed torrent %s from %s", best.Title, best.Indexer))
+			slog.Info("grabbed music torrent", "title", best.Title, "score", best.Score, "indexer", best.Indexer)
+			return
+		}
+	}
+
+	nzoID, err := s.grabberSvc.GrabNZB(best.NZBURL, best.Title)
+	if err != nil {
+		slog.Error("music grab failed", "title", best.Title, "error", err)
+		return
+	}
+
+	s.db.Exec(`INSERT INTO downloads (album_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'nzb')`,
+		albumID, best.Title, nzoID, string(qualityJSON), best.Score)
+
+	s.db.Exec(`UPDATE albums SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, albumID)
+
+	s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'grabbed', ?)`,
+		albumID, fmt.Sprintf("Grabbed %s from %s", best.Title, best.Indexer))
+
+	slog.Info("grabbed music release", "title", best.Title, "score", best.Score, "indexer", best.Indexer)
+}
+
+// loadIndexers returns enabled indexers from the database.
+func (s *Scheduler) loadIndexers() []indexer.IndexerConfig {
+	idxRows, err := s.db.Query(`SELECT id, name, url, api_key, priority, enabled, COALESCE(type,'newznab'), COALESCE(username,''), COALESCE(password,''), COALESCE(content_types,'["movie","series","anime","music"]') FROM indexers WHERE enabled = TRUE ORDER BY priority DESC`)
+	if err != nil {
+		return nil
 	}
 	defer idxRows.Close()
 
 	var indexers []indexer.IndexerConfig
 	for idxRows.Next() {
 		var idx indexer.IndexerConfig
-		if err := idxRows.Scan(&idx.ID, &idx.Name, &idx.URL, &idx.APIKey, &idx.Priority, &idx.Enabled); err != nil {
+		var contentTypesJSON string
+		if err := idxRows.Scan(&idx.ID, &idx.Name, &idx.URL, &idx.APIKey, &idx.Priority, &idx.Enabled, &idx.Type, &idx.Username, &idx.Password, &contentTypesJSON); err != nil {
 			continue
+		}
+		json.Unmarshal([]byte(contentTypesJSON), &idx.ContentTypes)
+		if idx.Type == "" {
+			idx.Type = "newznab"
 		}
 		indexers = append(indexers, idx)
 	}
+	return indexers
+}
 
-	if len(indexers) == 0 {
-		return
-	}
-
-	// Load quality profile
+// loadProfile loads a quality profile by ID.
+func (s *Scheduler) loadProfile(profileID int) *indexer.QualityProfile {
 	var profile indexer.QualityProfile
-	err = s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed
+	err := s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
 		FROM quality_profiles WHERE id = ?`, profileID).Scan(
 		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType)
 	if err != nil {
+		return nil
+	}
+	return &profile
+}
+
+func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdbID, season, episode int, absNum sql.NullInt64, anime bool, profileID int) {
+	allIndexers := s.loadIndexers()
+	if len(allIndexers) == 0 {
 		return
 	}
 
-	// Search
+	profile := s.loadProfile(profileID)
+	if profile == nil {
+		return
+	}
+
+	contentType := "series"
+	if anime {
+		contentType = "anime"
+	}
+
+	// Newznab search
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", contentType)
 	var releases []indexer.Release
 	if anime && absNum.Valid {
 		titles := []string{title}
-		releases = s.newznab.SearchAnimeEpisode(indexers, titles, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64))
 	} else {
-		releases = s.newznab.SearchEpisode(indexers, tvdbID, season, episode, title)
+		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, season, episode, title)
+	}
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	// Rutracker search
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
+	if len(rtIndexers) > 0 && s.rtClient != nil {
+		query := fmt.Sprintf("%s S%02dE%02d", title, season, episode)
+		if anime && absNum.Valid {
+			query = fmt.Sprintf("%s %d", title, absNum.Int64)
+		}
+		forumIDs := rutracker.DefaultForumIDs[contentType]
+		for _, idx := range rtIndexers {
+			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
+			if err != nil {
+				slog.Warn("rutracker search failed", "indexer", idx.Name, "error", err)
+				continue
+			}
+			for _, r := range results {
+				parsed := indexer.ParseReleaseName(r.Title)
+				releases = append(releases, indexer.Release{
+					Title:        r.Title,
+					Size:         r.Size,
+					Quality:      parsed.Quality,
+					Tags:         parsed.Tags,
+					Indexer:      idx.Name,
+					DownloadType: "torrent",
+					Seeders:      r.Seeders,
+					Leechers:     r.Leechers,
+					TopicID:      r.TopicID,
+				})
+			}
+		}
 	}
 
 	// Score releases
 	for i := range releases {
-		indexer.ScoreRelease(&releases[i], &profile)
+		indexer.ScoreRelease(&releases[i], profile)
 	}
 
 	best := indexer.BestRelease(releases)
@@ -366,17 +579,39 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 		return
 	}
 
-	// Grab the release
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		// Torrent grab
+		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
+		if len(rtIdxs) > 0 && s.rtClient != nil && s.qbt != nil {
+			idx := rtIdxs[0]
+			torrentData, err := s.rtClient.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				slog.Error("torrent download failed", "title", best.Title, "error", err)
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
+				mediaItemID, episodeID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
+				mediaItemID, episodeID, fmt.Sprintf("Grabbed torrent %s from %s", best.Title, best.Indexer))
+			slog.Info("grabbed torrent release", "title", best.Title, "score", best.Score, "indexer", best.Indexer)
+			return
+		}
+	}
+
+	// NZB grab
 	nzoID, err := s.grabberSvc.GrabNZB(best.NZBURL, best.Title)
 	if err != nil {
 		slog.Error("grab failed", "title", best.Title, "error", err)
 		return
 	}
 
-	// Record download
-	qualityJSON, _ := json.Marshal(best.Quality)
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
 		mediaItemID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
 
 	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
@@ -386,6 +621,168 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 		mediaItemID, episodeID, fmt.Sprintf("Grabbed %s from %s", best.Title, best.Indexer))
 
 	slog.Info("grabbed release", "title", best.Title, "score", best.Score, "indexer", best.Indexer)
+}
+
+// pollTorrentDownloads checks qBittorrent for torrent progress and triggers post-processing.
+func (s *Scheduler) pollTorrentDownloads() {
+	if s.qbt == nil {
+		return
+	}
+
+	// Check if qBittorrent is enabled
+	enabled, _ := s.db.GetSetting("qbittorrent_enabled")
+	if enabled != "true" {
+		return
+	}
+
+	torrents, err := s.qbt.GetTorrents()
+	if err != nil {
+		slog.Debug("failed to poll qBittorrent", "error", err)
+		return
+	}
+
+	for _, t := range torrents {
+		// Extract download ID from tags ("dl_42" → 42)
+		dlID := extractDownloadID(t.Tags)
+		if dlID == 0 {
+			continue
+		}
+
+		// Map qBittorrent state to our status
+		var status string
+		switch t.State {
+		case "downloading", "stalledDL", "metaDL", "allocating", "checkingDL":
+			status = "downloading"
+		case "uploading", "stalledUP", "pausedUP", "forcedUP", "checkingUP", "queuedUP":
+			status = "seeding"
+		case "error", "missingFiles":
+			status = "failed"
+		default:
+			status = "downloading"
+		}
+
+		// Update download record
+		s.db.Exec(`UPDATE downloads SET status = ?, qbt_hash = ? WHERE id = ? AND status NOT IN ('imported', 'failed')`,
+			status, t.Hash, dlID)
+
+		// If torrent completed downloading (progress == 1.0) and not yet post-processed
+		if t.Progress >= 1.0 {
+			var completedTS sql.NullInt64
+			s.db.QueryRow(`SELECT completed_at_ts FROM downloads WHERE id = ?`, dlID).Scan(&completedTS)
+
+			if !completedTS.Valid {
+				// Mark completion time
+				now := time.Now().Unix()
+				s.db.Exec(`UPDATE downloads SET completed_at_ts = ?, status = 'seeding' WHERE id = ?`, now, dlID)
+
+				// Trigger post-processing via hardlink
+				contentPath := t.ContentPath
+				if contentPath == "" {
+					contentPath = t.SavePath
+				}
+				if err := s.processor.ProcessTorrent(dlID, contentPath); err != nil {
+					slog.Error("torrent post-processing failed", "download_id", dlID, "error", err)
+					// Don't set status to failed — let it keep seeding, user can retry
+				}
+			}
+		}
+	}
+}
+
+// cleanupSeededTorrents removes torrents that have seeded long enough.
+func (s *Scheduler) cleanupSeededTorrents() {
+	if s.qbt == nil {
+		return
+	}
+
+	enabled, _ := s.db.GetSetting("qbittorrent_enabled")
+	if enabled != "true" {
+		return
+	}
+
+	// Load seed time setting
+	seedTimeStr, _ := s.db.GetSetting("torrent_seed_time_hours")
+	seedTimeHours := 24
+	if v, err := fmt.Sscanf(seedTimeStr, "%d", &seedTimeHours); v == 0 || err != nil {
+		seedTimeHours = 24
+	}
+
+	removeAfterStr, _ := s.db.GetSetting("torrent_remove_after_seed")
+	removeAfterSeed := removeAfterStr != "false" // default true
+
+	if !removeAfterSeed {
+		return
+	}
+
+	rows, err := s.db.Query(`SELECT id, qbt_hash, completed_at_ts FROM downloads WHERE download_type = 'torrent' AND status = 'seeding' AND completed_at_ts IS NOT NULL`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	now := time.Now().Unix()
+	seedDuration := int64(seedTimeHours) * 3600
+
+	for rows.Next() {
+		var dlID int
+		var hash sql.NullString
+		var completedTS int64
+		if err := rows.Scan(&dlID, &hash, &completedTS); err != nil {
+			continue
+		}
+
+		if now-completedTS < seedDuration {
+			continue
+		}
+
+		// Seed time exceeded — remove torrent
+		if hash.Valid && hash.String != "" {
+			if err := s.qbt.DeleteTorrent(hash.String, true); err != nil {
+				slog.Warn("failed to delete seeded torrent", "hash", hash.String, "error", err)
+				continue
+			}
+		}
+
+		s.db.Exec(`UPDATE downloads SET status = 'completed' WHERE id = ?`, dlID)
+		slog.Info("removed seeded torrent", "download_id", dlID, "seed_hours", (now-completedTS)/3600)
+	}
+}
+
+// extractDownloadID extracts the download ID from qBittorrent tags like "dl_42".
+func extractDownloadID(tags string) int {
+	for _, tag := range strings.Split(tags, ",") {
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, "dl_") {
+			var id int
+			fmt.Sscanf(tag, "dl_%d", &id)
+			return id
+		}
+	}
+	return 0
+}
+
+// filterIndexersByType returns indexers of a specific type that support a content type.
+func filterIndexersByType(indexers []indexer.IndexerConfig, idxType, contentType string) []indexer.IndexerConfig {
+	var filtered []indexer.IndexerConfig
+	for _, idx := range indexers {
+		if idx.Type != idxType {
+			continue
+		}
+		if contentType != "" {
+			found := false
+			for _, ct := range idx.ContentTypes {
+				if ct == contentType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		filtered = append(filtered, idx)
+	}
+	return filtered
 }
 
 // resolveSABnzbdPath translates SABnzbd's internal path to a path accessible by Zarr.

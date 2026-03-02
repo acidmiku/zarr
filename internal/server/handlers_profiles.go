@@ -6,7 +6,7 @@ import (
 )
 
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed
+	rows, err := s.db.Query(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
 		FROM quality_profiles ORDER BY id`)
 	if err != nil {
 		writeError(w, 500, "database error")
@@ -22,13 +22,14 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 		Language       string          `json:"language"`
 		RejectPatterns json.RawMessage `json:"reject_patterns"`
 		UpgradeAllowed bool            `json:"upgrade_allowed"`
+		ProfileType    string          `json:"profile_type"`
 	}
 
 	var profiles []profileEntry
 	for rows.Next() {
 		var p profileEntry
 		var qualities, tags, reject string
-		if err := rows.Scan(&p.ID, &p.Name, &qualities, &tags, &p.Language, &reject, &p.UpgradeAllowed); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &qualities, &tags, &p.Language, &reject, &p.UpgradeAllowed, &p.ProfileType); err != nil {
 			continue
 		}
 		p.Qualities = json.RawMessage(qualities)
@@ -60,6 +61,7 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 		Language       string          `json:"language"`
 		RejectPatterns json.RawMessage `json:"reject_patterns"`
 		UpgradeAllowed bool            `json:"upgrade_allowed"`
+		ProfileType    string          `json:"profile_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid JSON")
@@ -73,6 +75,9 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 	if req.Language == "" {
 		req.Language = "en"
 	}
+	if req.ProfileType == "" {
+		req.ProfileType = "video"
+	}
 
 	qualities := string(req.Qualities)
 	tags := string(req.Tags)
@@ -80,9 +85,9 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 	if tags == "" { tags = "{}" }
 	if reject == "" { reject = "[]" }
 
-	result, err := s.db.Exec(`INSERT INTO quality_profiles (name, qualities, tags, language, reject_patterns, upgrade_allowed)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		req.Name, qualities, tags, req.Language, reject, req.UpgradeAllowed)
+	result, err := s.db.Exec(`INSERT INTO quality_profiles (name, qualities, tags, language, reject_patterns, upgrade_allowed, profile_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		req.Name, qualities, tags, req.Language, reject, req.UpgradeAllowed, req.ProfileType)
 	if err != nil {
 		writeError(w, 500, "database error: "+err.Error())
 		return
@@ -106,16 +111,21 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		Language       string          `json:"language"`
 		RejectPatterns json.RawMessage `json:"reject_patterns"`
 		UpgradeAllowed bool            `json:"upgrade_allowed"`
+		ProfileType    string          `json:"profile_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
 
+	profileType := "video"
+	if req.ProfileType != "" {
+		profileType = req.ProfileType
+	}
 	_, err = s.db.Exec(`UPDATE quality_profiles SET name = ?, qualities = ?, tags = ?, language = ?,
-		reject_patterns = ?, upgrade_allowed = ? WHERE id = ?`,
+		reject_patterns = ?, upgrade_allowed = ?, profile_type = ? WHERE id = ?`,
 		req.Name, string(req.Qualities), string(req.Tags), req.Language,
-		string(req.RejectPatterns), req.UpgradeAllowed, id)
+		string(req.RejectPatterns), req.UpgradeAllowed, profileType, id)
 	if err != nil {
 		writeError(w, 500, "database error: "+err.Error())
 		return

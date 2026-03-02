@@ -11,6 +11,19 @@
 	let proxy = '';
 	let mediaRoot = '';
 
+	// Music settings
+	let lastfmKey = '';
+
+	// qBittorrent settings
+	let qbtEnabled = false;
+	let qbtUrl = '';
+	let qbtUsername = '';
+	let qbtPassword = '';
+	let seedTimeHours = '24';
+	let removeAfterSeed = true;
+	let testingQBT = false;
+	let qbtTestResult = null;
+
 	// AI settings
 	let orKey = '';
 	let orModel = '';
@@ -24,7 +37,8 @@
 
 	// Indexers
 	let indexers = [];
-	let newIndexer = { name: '', url: '', api_key: '', priority: 0, enabled: true };
+	let newIndexerType = 'newznab';
+	let newIndexer = { name: '', url: '', api_key: '', priority: 0, enabled: true, type: 'newznab', username: '', password: '', content_types: ['movie', 'series', 'anime', 'music'] };
 
 	// Profiles
 	let profiles = [];
@@ -47,6 +61,17 @@
 			sabKey = '';
 			proxy = settings.proxy || '';
 			mediaRoot = settings.media_root || '/data/media';
+
+			// Music settings
+			lastfmKey = '';
+
+			// qBittorrent settings
+			qbtEnabled = settings.qbittorrent_enabled || false;
+			qbtUrl = settings.qbittorrent_url || 'http://qbittorrent:8080';
+			qbtUsername = settings.qbittorrent_username || 'admin';
+			qbtPassword = '';
+			seedTimeHours = settings.torrent_seed_time_hours || '24';
+			removeAfterSeed = settings.torrent_remove_after_seed !== false;
 
 			// AI settings
 			orKey = '';
@@ -84,6 +109,17 @@
 			data.proxy = proxy;
 			data.media_root = mediaRoot;
 
+			// Music settings
+			if (lastfmKey) data.lastfm_api_key = lastfmKey;
+
+			// qBittorrent settings
+			data.qbittorrent_enabled = qbtEnabled;
+			data.qbittorrent_url = qbtUrl;
+			data.qbittorrent_username = qbtUsername;
+			if (qbtPassword) data.qbittorrent_password = qbtPassword;
+			data.torrent_seed_time_hours = seedTimeHours;
+			data.torrent_remove_after_seed = removeAfterSeed;
+
 			// AI settings
 			if (orKey) data.openrouter_api_key = orKey;
 			if (orModel) data.openrouter_model = orModel;
@@ -96,7 +132,9 @@
 			settings = await api.getSettings();
 			tmdbKey = '';
 			sabKey = '';
+			qbtPassword = '';
 			orKey = '';
+			lastfmKey = '';
 			braveKey = '';
 
 			if (settings.openrouter_configured && aiModels.length === 0) {
@@ -122,20 +160,55 @@
 		testingOR = false;
 	}
 
+	async function testQBittorrent() {
+		testingQBT = true;
+		qbtTestResult = null;
+		try {
+			const result = await api.testQBittorrent({
+				url: qbtUrl,
+				username: qbtUsername,
+				password: qbtPassword || undefined
+			});
+			qbtTestResult = result.success ? 'success' : result.error;
+		} catch (e) {
+			qbtTestResult = e.message;
+		}
+		testingQBT = false;
+	}
+
 	$: filteredModels = aiModels.filter(m =>
 		!modelSearch || m.id.toLowerCase().includes(modelSearch.toLowerCase()) || m.name.toLowerCase().includes(modelSearch.toLowerCase())
 	).slice(0, 50);
 
 	// Indexer operations
+	function resetNewIndexer() {
+		newIndexer = {
+			name: '', url: newIndexerType === 'rutracker' ? 'https://rutracker.org' : '',
+			api_key: '', priority: 0, enabled: true,
+			type: newIndexerType, username: '', password: '',
+			content_types: ['movie', 'series', 'anime', 'music']
+		};
+	}
+
+	$: if (newIndexerType) resetNewIndexer();
+
 	async function addIndexer() {
-		if (!newIndexer.name || !newIndexer.url || !newIndexer.api_key) {
-			notify('Fill in all indexer fields', 'error');
+		if (!newIndexer.name || !newIndexer.url) {
+			notify('Fill in required indexer fields', 'error');
+			return;
+		}
+		if (newIndexer.type === 'newznab' && !newIndexer.api_key) {
+			notify('API key required for Newznab indexers', 'error');
+			return;
+		}
+		if (newIndexer.type === 'rutracker' && (!newIndexer.username || !newIndexer.password)) {
+			notify('Username and password required for Rutracker', 'error');
 			return;
 		}
 		try {
 			await api.createIndexer(newIndexer);
 			notify('Indexer added', 'success');
-			newIndexer = { name: '', url: '', api_key: '', priority: 0, enabled: true };
+			resetNewIndexer();
 			indexers = await api.getIndexers();
 		} catch (e) {
 			notify(e.message, 'error');
@@ -172,6 +245,14 @@
 			indexers = await api.getIndexers();
 		} catch (e) {
 			notify(e.message, 'error');
+		}
+	}
+
+	function toggleContentType(ct) {
+		if (newIndexer.content_types.includes(ct)) {
+			newIndexer.content_types = newIndexer.content_types.filter(t => t !== ct);
+		} else {
+			newIndexer.content_types = [...newIndexer.content_types, ct];
 		}
 	}
 
@@ -249,9 +330,11 @@
 		</div>
 	</section>
 
-	<!-- SABnzbd -->
+	<!-- Downloaders -->
 	<section class="section">
-		<h2>SABnzbd</h2>
+		<h2>Downloaders</h2>
+
+		<h3>Usenet (SABnzbd)</h3>
 		<div class="form-grid">
 			<div class="field">
 				<label>URL</label>
@@ -263,6 +346,67 @@
 					placeholder={settings.sabnzbd_configured ? '••••••••' : 'Enter SABnzbd API key'} />
 			</div>
 		</div>
+
+		<h3>Torrent (qBittorrent)</h3>
+		<div class="form-grid">
+			<div class="field">
+				<label>
+					<input type="checkbox" bind:checked={qbtEnabled} />
+					Enable qBittorrent
+				</label>
+			</div>
+		</div>
+		{#if qbtEnabled}
+			<div class="form-grid" style="margin-top: 0.5rem">
+				<div class="field">
+					<label>URL</label>
+					<input type="text" bind:value={qbtUrl} placeholder="http://qbittorrent:8080" />
+				</div>
+				<div class="field">
+					<label>Username</label>
+					<input type="text" bind:value={qbtUsername} placeholder="admin" />
+				</div>
+				<div class="field">
+					<label>Password</label>
+					<div class="key-row">
+						<input type="password" bind:value={qbtPassword}
+							placeholder={settings.qbittorrent_configured ? '••••••••' : 'Enter password'} />
+						<button class="btn btn-small" on:click={testQBittorrent} disabled={testingQBT}>
+							{testingQBT ? '...' : 'Test'}
+						</button>
+						{#if qbtTestResult === 'success'}
+							<span class="test-ok">OK</span>
+						{:else if qbtTestResult}
+							<span class="test-fail">{qbtTestResult}</span>
+						{/if}
+					</div>
+				</div>
+			</div>
+			<div class="form-grid" style="margin-top: 0.5rem">
+				<div class="field">
+					<label>Seed time (hours)</label>
+					<input type="text" bind:value={seedTimeHours} placeholder="24" />
+				</div>
+				<div class="field">
+					<label>
+						<input type="checkbox" bind:checked={removeAfterSeed} />
+						Remove torrent after seeding
+					</label>
+				</div>
+			</div>
+		{/if}
+	</section>
+
+	<!-- Music -->
+	<section class="section">
+		<h2>Music</h2>
+		<div class="form-grid">
+			<div class="field">
+				<label>Last.fm API Key</label>
+				<input type="password" bind:value={lastfmKey}
+					placeholder={settings.lastfm_configured ? '••••••••' : 'Enter Last.fm API key'} />
+			</div>
+		</div>
 	</section>
 
 	<!-- Indexers -->
@@ -272,7 +416,12 @@
 			{#each indexers as idx}
 				<div class="list-item">
 					<div class="item-info">
-						<span class="item-name">{idx.name}</span>
+						<span class="item-name">
+							{idx.name}
+							<span class="type-badge" class:torrent={idx.type === 'rutracker'}>
+								{idx.type === 'rutracker' ? 'Rutracker' : 'Newznab'}
+							</span>
+						</span>
 						<span class="item-url">{idx.url}</span>
 					</div>
 					<div class="item-actions">
@@ -288,11 +437,44 @@
 
 		<div class="add-form">
 			<h3>Add Indexer</h3>
-			<div class="form-row">
-				<input type="text" bind:value={newIndexer.name} placeholder="Name" />
-				<input type="text" bind:value={newIndexer.url} placeholder="Newznab API URL" />
-				<input type="text" bind:value={newIndexer.api_key} placeholder="API Key" />
-				<button class="btn btn-primary" on:click={addIndexer}>Add</button>
+			<div class="field" style="max-width: 200px; margin-bottom: 0.5rem">
+				<label>Type</label>
+				<select bind:value={newIndexerType}>
+					<option value="newznab">Newznab</option>
+					<option value="rutracker">Rutracker</option>
+				</select>
+			</div>
+
+			{#if newIndexerType === 'newznab'}
+				<div class="form-row">
+					<input type="text" bind:value={newIndexer.name} placeholder="Name" />
+					<input type="text" bind:value={newIndexer.url} placeholder="Newznab API URL" />
+					<input type="text" bind:value={newIndexer.api_key} placeholder="API Key" />
+					<button class="btn btn-primary" on:click={addIndexer}>Add</button>
+				</div>
+			{:else}
+				<div class="form-row">
+					<input type="text" bind:value={newIndexer.name} placeholder="Name (e.g. Rutracker)" />
+					<input type="text" bind:value={newIndexer.url} placeholder="https://rutracker.org" />
+				</div>
+				<div class="form-row" style="margin-top: 0.5rem">
+					<input type="text" bind:value={newIndexer.username} placeholder="Username" />
+					<input type="password" bind:value={newIndexer.password} placeholder="Password" />
+					<button class="btn btn-primary" on:click={addIndexer}>Add</button>
+				</div>
+			{/if}
+
+			<div class="content-types" style="margin-top: 0.5rem">
+				<label style="font-size: 0.8rem; color: var(--text-secondary)">Content types:</label>
+				<div class="ct-row">
+					{#each ['movie', 'series', 'anime', 'music'] as ct}
+						<label class="ct-label">
+							<input type="checkbox" checked={newIndexer.content_types.includes(ct)}
+								on:change={() => toggleContentType(ct)} />
+							{ct}
+						</label>
+					{/each}
+				</div>
 			</div>
 		</div>
 	</section>
@@ -467,7 +649,7 @@
 		margin-bottom: 0.25rem;
 	}
 
-	input[type="text"], input[type="password"], select {
+	input[type="text"], input[type="password"], input[type="number"], select {
 		width: 100%;
 		padding: 0.55rem 0.75rem;
 		background: var(--bg-input);
@@ -528,8 +710,23 @@
 		gap: 2px;
 	}
 
-	.item-name { font-weight: 500; font-size: 0.9rem; }
+	.item-name { font-weight: 500; font-size: 0.9rem; display: flex; align-items: center; gap: 0.4rem; }
 	.item-url, .item-meta { font-size: 0.75rem; color: var(--text-muted); }
+
+	.type-badge {
+		font-size: 0.65rem;
+		font-weight: 700;
+		padding: 0.1rem 0.4rem;
+		border-radius: 3px;
+		background: var(--accent-subtle);
+		color: var(--accent);
+		text-transform: uppercase;
+	}
+
+	.type-badge.torrent {
+		background: #2d1f4e;
+		color: #b388ff;
+	}
 
 	.item-actions {
 		display: flex;
@@ -562,6 +759,26 @@
 	}
 
 	.form-row input { flex: 1; min-width: 120px; }
+
+	.content-types {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	.ct-row {
+		display: flex;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.ct-label {
+		display: flex;
+		align-items: center;
+		font-size: 0.8rem;
+		color: var(--text-primary);
+		text-transform: capitalize;
+	}
 
 	.profile-form {
 		display: flex;

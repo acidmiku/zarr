@@ -43,13 +43,16 @@
 		{#each downloads as dl}
 			<div class="download-item">
 				<div class="dl-info">
-					<div class="dl-title">{dl.media_title}</div>
+					<div class="dl-title">
+						{dl.media_title}
+						<span class="dl-type-badge" class:torrent={dl.download_type === 'torrent'}>{dl.download_type === 'torrent' ? 'Torrent' : 'NZB'}</span>
+					</div>
 					<div class="dl-nzb">{dl.nzb_title}</div>
 				</div>
 				<div class="dl-progress">
 					{#if dl.percentage}
 						<div class="progress-bar">
-							<div class="progress-fill" style="width: {dl.percentage}%"></div>
+							<div class="progress-fill" class:seeding={dl.status === 'seeding'} style="width: {dl.percentage}%"></div>
 						</div>
 						<span class="progress-text">{dl.percentage}%</span>
 					{/if}
@@ -57,6 +60,9 @@
 				<div class="dl-meta">
 					{#if dl.speed}<span class="dl-speed">{dl.speed}/s</span>{/if}
 					{#if dl.time_left}<span class="dl-eta">{dl.time_left}</span>{/if}
+					{#if dl.status === 'seeding' && dl.seed_ratio != null}
+						<span class="dl-ratio">Ratio: {dl.seed_ratio.toFixed(2)}</span>
+					{/if}
 				</div>
 				<StatusBadge status={dl.status} small />
 				<div class="dl-actions">
@@ -104,6 +110,25 @@
 		font-weight: 500;
 		font-size: 0.9rem;
 		color: var(--text-primary);
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+	}
+
+	.dl-type-badge {
+		background: var(--info-bg);
+		color: var(--info);
+		padding: 1px 5px;
+		border-radius: 3px;
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		flex-shrink: 0;
+	}
+
+	.dl-type-badge.torrent {
+		background: var(--success-bg);
+		color: var(--success);
 	}
 
 	.dl-nzb {
@@ -136,6 +161,10 @@
 		transition: width 0.3s;
 	}
 
+	.progress-fill.seeding {
+		background: var(--success);
+	}
+
 	.progress-text {
 		font-size: 0.75rem;
 		color: var(--text-secondary);
@@ -153,6 +182,11 @@
 
 	.dl-speed {
 		color: var(--accent);
+	}
+
+	.dl-ratio {
+		color: var(--success);
+		font-weight: 500;
 	}
 
 	.dl-actions {

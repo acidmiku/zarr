@@ -60,6 +60,45 @@ func AnimeSpecialPath(mediaRoot, title string, specialNum int, episodeTitle, ext
 	return filepath.Join(mediaRoot, "anime", clean, "Specials", file)
 }
 
+// Audio file extensions.
+var audioExtensions = map[string]bool{
+	".flac": true,
+	".mp3":  true,
+	".ogg":  true,
+	".m4a":  true,
+	".aac":  true,
+	".wav":  true,
+}
+
+// IsAudioFile checks if a filename has an audio extension.
+func IsAudioFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return audioExtensions[ext]
+}
+
+// MusicTrackPath generates the destination path for a music track.
+// Format: music/{artist}/{album} ({year})/{track:02d} - {title}.{ext}
+func MusicTrackPath(mediaRoot, artist, album string, year, trackNum, discNum int, title, ext string) string {
+	cleanArtist := sanitizeFilename(artist)
+	cleanAlbum := sanitizeFilename(album)
+	cleanTitle := sanitizeFilename(title)
+
+	var albumDir string
+	if year > 0 {
+		albumDir = fmt.Sprintf("%s (%d)", cleanAlbum, year)
+	} else {
+		albumDir = cleanAlbum
+	}
+
+	var file string
+	if discNum > 1 {
+		file = fmt.Sprintf("%d-%02d - %s%s", discNum, trackNum, cleanTitle, ext)
+	} else {
+		file = fmt.Sprintf("%02d - %s%s", trackNum, cleanTitle, ext)
+	}
+	return filepath.Join(mediaRoot, "music", cleanArtist, albumDir, file)
+}
+
 // Video file extensions.
 var videoExtensions = map[string]bool{
 	".mkv": true,

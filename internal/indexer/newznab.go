@@ -22,12 +22,16 @@ func NewNewznabClient(client *http.Client) *NewznabClient {
 
 // IndexerConfig holds the configuration for a single indexer.
 type IndexerConfig struct {
-	ID       int
-	Name     string
-	URL      string
-	APIKey   string
-	Priority int
-	Enabled  bool
+	ID           int
+	Name         string
+	URL          string
+	APIKey       string
+	Priority     int
+	Enabled      bool
+	Type         string   // "newznab" or "rutracker"
+	Username     string
+	Password     string
+	ContentTypes []string // e.g. ["movie","series","anime","music"]
 }
 
 // NewznabResponse represents the RSS/XML response from a Newznab API.
@@ -268,6 +272,67 @@ func (c *NewznabClient) SearchEpisode(indexers []IndexerConfig, tvdbID, season, 
 
 		for _, item := range items {
 			parsed := ParseReleaseName(item.Title)
+			allReleases = append(allReleases, Release{
+				Title:   item.Title,
+				NZBURL:  item.Link,
+				Size:    item.Size,
+				Quality: parsed.Quality,
+				Tags:    parsed.Tags,
+				Indexer: idx.Name,
+			})
+		}
+	}
+
+	return allReleases
+}
+
+// SearchMusicByCategory searches for music using the music category.
+func (c *NewznabClient) SearchMusicByCategory(idx IndexerConfig, query string) ([]NewznabItem, error) {
+	u := buildURL(idx.URL, map[string]string{
+		"t": "music", "q": query, "apikey": idx.APIKey,
+	})
+	return c.fetch(u, idx.Name)
+}
+
+// SearchMusicByText searches for music using general text search.
+func (c *NewznabClient) SearchMusicByText(idx IndexerConfig, query string) ([]NewznabItem, error) {
+	u := buildURL(idx.URL, map[string]string{
+		"t": "search", "q": query, "apikey": idx.APIKey,
+	})
+	return c.fetch(u, idx.Name)
+}
+
+// SearchMusic searches all indexers for a music album.
+// Tries music category first, falls back to text search with FLAC.
+func (c *NewznabClient) SearchMusic(indexers []IndexerConfig, artist, album string, year int) []Release {
+	var allReleases []Release
+
+	query := fmt.Sprintf("%s %s", artist, album)
+	if year > 0 {
+		query = fmt.Sprintf("%s %s %d", artist, album, year)
+	}
+
+	for _, idx := range indexers {
+		if !idx.Enabled {
+			continue
+		}
+
+		var items []NewznabItem
+		var err error
+
+		// Try music category first
+		items, err = c.SearchMusicByCategory(idx, query)
+		if err != nil || len(items) == 0 {
+			// Fallback to text search with FLAC keyword
+			items, err = c.SearchMusicByText(idx, query+" FLAC")
+		}
+		if err != nil {
+			slog.Warn("indexer music search failed", "indexer", idx.Name, "error", err)
+			continue
+		}
+
+		for _, item := range items {
+			parsed := ParseMusicReleaseName(item.Title)
 			allReleases = append(allReleases, Release{
 				Title:   item.Title,
 				NZBURL:  item.Link,

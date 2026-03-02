@@ -5,6 +5,7 @@
 	import RecommendationCard from '$lib/components/RecommendationCard.svelte';
 	import ToolIndicator from '$lib/components/ToolIndicator.svelte';
 	import MediaDetail from '$lib/components/MediaDetail.svelte';
+	import MusicDetail from '$lib/components/MusicDetail.svelte';
 
 	let sessions = [];
 	let currentSessionId = null;
@@ -17,6 +18,7 @@
 	let loading = true;
 	let profiles = [];
 	let selectedItem = null;
+	let musicDetailItem = null;
 
 	onMount(async () => {
 		try {
@@ -61,13 +63,22 @@
 			for (const tc of tcs) {
 				if (tc.function?.name === 'show_recommendations') {
 					const args = JSON.parse(tc.function.arguments);
-					return (args.recommendations || []).map(r => ({
-						title: r.title,
-						media_type: r.media_type,
-						reason: r.reason,
-						poster_url: r.mal_id ? `/api/image/jikan/${r.mal_id}` : null,
-						score: r.score || null
-					}));
+					return (args.recommendations || []).map(r => {
+						let poster_url = null;
+						if (r.media_type === 'music' && r.release_group_id) {
+							poster_url = `/api/music/cover?rgid=${r.release_group_id}`;
+						} else if (r.mal_id) {
+							poster_url = `/api/image/jikan/${r.mal_id}`;
+						}
+						return {
+							title: r.title,
+							media_type: r.media_type,
+							reason: r.reason,
+							poster_url,
+							score: r.score || null,
+							release_group_id: r.release_group_id || null
+						};
+					});
 				}
 			}
 		} catch {}
@@ -335,9 +346,14 @@
 		selectedItem = event.detail;
 	}
 
+	function handleShowMusicDetail(event) {
+		musicDetailItem = event.detail;
+	}
+
 	function handleAdded() {
 		notify('Added to library!', 'success');
 		selectedItem = null;
+		musicDetailItem = null;
 	}
 
 	$: grouped = groupSessions(sessions);
@@ -387,8 +403,8 @@
 					{#if messages.length === 0 && !currentSessionId}
 						<div class="welcome">
 							<div class="welcome-card">
-								<h2>What should you watch next?</h2>
-								<p>I'll analyze your ratings and suggest personalized recommendations, or we can just chat about movies, series, and anime.</p>
+								<h2>What should you watch or listen to next?</h2>
+								<p>I'll analyze your ratings and suggest personalized recommendations, or we can just chat about movies, series, anime, and music.</p>
 								<button class="btn btn-primary" on:click={getRecommendations}>
 									Get Recommendations
 								</button>
@@ -414,7 +430,7 @@
 									{#if msg.recommendations && msg.recommendations.length > 0}
 										<div class="recs-inline">
 											{#each msg.recommendations as rec}
-												<RecommendationCard {rec} on:showDetail={handleShowDetail} />
+												<RecommendationCard {rec} on:showDetail={handleShowDetail} on:showMusicDetail={handleShowMusicDetail} />
 											{/each}
 										</div>
 									{/if}
@@ -435,7 +451,7 @@
 					<textarea
 						bind:value={inputText}
 						on:keydown={handleKeydown}
-						placeholder="Ask about movies, series, anime..."
+						placeholder="Ask about movies, series, anime, music..."
 						rows="1"
 						disabled={isStreaming}
 					></textarea>
@@ -457,6 +473,21 @@
 				item={selectedItem}
 				{profiles}
 				mode="discovery"
+				on:added={handleAdded}
+				on:error={(e) => notify(e.detail, 'error')}
+			/>
+		</div>
+	</div>
+{/if}
+
+{#if musicDetailItem}
+	<!-- svelte-ignore a11y-click-events-have-key-events -->
+	<div class="modal-overlay" on:click={() => musicDetailItem = null} role="presentation">
+		<div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
+			<button class="modal-close" on:click={() => musicDetailItem = null}>✕</button>
+			<MusicDetail
+				item={musicDetailItem}
+				{profiles}
 				on:added={handleAdded}
 				on:error={(e) => notify(e.detail, 'error')}
 			/>

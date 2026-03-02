@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 
 	"mediaforge/internal/indexer"
+	"mediaforge/internal/rutracker"
 )
 
 func (s *Server) handleGetEpisodes(w http.ResponseWriter, r *http.Request) {
@@ -229,16 +231,41 @@ func (s *Server) searchForEpisode(w http.ResponseWriter, mediaID, episodeID int)
 		return
 	}
 
-	// Grab the best release
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		// Torrent grab
+		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
+		if len(rtIndexers) > 0 {
+			idx := rtIndexers[0]
+			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				writeError(w, 502, "torrent download failed: "+err.Error())
+				return
+			}
+
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
+				mediaID, episodeID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
+				mediaID, episodeID, "Grabbed torrent "+best.Title)
+
+			writeJSON(w, 200, map[string]interface{}{"status": "grabbed", "release": best})
+			return
+		}
+	}
+
+	// NZB grab
 	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
 	if err != nil {
 		writeError(w, 500, "grab failed: "+err.Error())
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
 		mediaID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
 
 	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
@@ -264,14 +291,35 @@ func (s *Server) searchForEpisodeSilent(mediaID, episodeID int) {
 		return
 	}
 
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
+		if len(rtIndexers) > 0 {
+			idx := rtIndexers[0]
+			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				slog.Warn("silent torrent grab failed", "error", err)
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
+				mediaID, episodeID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
+				mediaID, episodeID, "Grabbed torrent "+best.Title)
+			return
+		}
+	}
+
 	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
 	if err != nil {
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
 		mediaID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
 	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
 	s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
@@ -285,9 +333,25 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
 		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &imdbID, &year, &profileID)
 
-	idxConfigs := s.loadIndexers()
+	allIndexers := s.loadIndexers()
 
-	releases := s.newznab.SearchMovie(idxConfigs, imdbID, title, year)
+	// Newznab search
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+	releases := s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	// Rutracker search
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+	if len(rtIndexers) > 0 {
+		query := title
+		if year > 0 {
+			query = fmt.Sprintf("%s %d", title, year)
+		}
+		rtReleases := s.searchRutracker(rtIndexers, query, "movie")
+		releases = append(releases, rtReleases...)
+	}
 
 	var profile indexer.QualityProfile
 	s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
@@ -308,15 +372,38 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 		return
 	}
 
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
+		if len(rtIdxs) > 0 {
+			idx := rtIdxs[0]
+			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				writeError(w, 502, "torrent download failed: "+err.Error())
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, 'torrent')`,
+				mediaID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'grabbed', ?)`,
+				mediaID, fmt.Sprintf("Grabbed torrent %s", best.Title))
+
+			writeJSON(w, 200, map[string]interface{}{"status": "grabbed", "release": best})
+			return
+		}
+	}
+
 	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
 	if err != nil {
 		writeError(w, 500, "grab failed: "+err.Error())
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-	s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, sabnzbd_nzo_id, quality, score)
-		VALUES (?, ?, ?, ?, ?)`, mediaID, best.Title, nzoID, string(qualityJSON), best.Score)
+	s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, 'nzb')`, mediaID, best.Title, nzoID, string(qualityJSON), best.Score)
 	s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaID)
 	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details)
 		VALUES (?, 'grabbed', ?)`, mediaID, fmt.Sprintf("Grabbed %s", best.Title))
@@ -340,14 +427,36 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 		FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE e.id = ?`,
 		episodeID).Scan(&seasonNum, &epNum, &absNum)
 
-	idxConfigs := s.loadIndexers()
+	allIndexers := s.loadIndexers()
+
+	// Newznab search
+	contentType := "series"
+	if anime {
+		contentType = "anime"
+	}
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", contentType)
 
 	var releases []indexer.Release
 	if anime && absNum.Valid {
 		titles := []string{title}
-		releases = s.newznab.SearchAnimeEpisode(idxConfigs, titles, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64))
 	} else {
-		releases = s.newznab.SearchEpisode(idxConfigs, tvdbID, seasonNum, epNum, title)
+		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, seasonNum, epNum, title)
+	}
+	// Mark NZB releases
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	// Rutracker search
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
+	if len(rtIndexers) > 0 {
+		query := fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)
+		if anime && absNum.Valid {
+			query = fmt.Sprintf("%s %d", title, absNum.Int64)
+		}
+		rtReleases := s.searchRutracker(rtIndexers, query, contentType)
+		releases = append(releases, rtReleases...)
 	}
 
 	var profile indexer.QualityProfile
@@ -363,8 +472,69 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	return releases, nil
 }
 
+// filterIndexersByType returns indexers of a specific type that support a content type.
+func filterIndexersByType(indexers []indexer.IndexerConfig, idxType, contentType string) []indexer.IndexerConfig {
+	var filtered []indexer.IndexerConfig
+	for _, idx := range indexers {
+		if idx.Type != idxType {
+			continue
+		}
+		if contentType != "" && !containsStr(idx.ContentTypes, contentType) {
+			continue
+		}
+		filtered = append(filtered, idx)
+	}
+	return filtered
+}
+
+func containsStr(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// searchRutracker searches Rutracker indexers and returns releases.
+func (s *Server) searchRutracker(indexers []indexer.IndexerConfig, query, contentType string) []indexer.Release {
+	if s.rutracker == nil {
+		return nil
+	}
+
+	var allReleases []indexer.Release
+	forumIDs := rutracker.DefaultForumIDs[contentType]
+	if len(forumIDs) == 0 {
+		forumIDs = rutracker.DefaultForumIDs["movie"]
+	}
+
+	for _, idx := range indexers {
+		results, err := s.rutracker.Search(query, forumIDs, idx.Username, idx.Password)
+		if err != nil {
+			slog.Warn("rutracker search failed", "indexer", idx.Name, "error", err)
+			continue
+		}
+
+		for _, r := range results {
+			parsed := indexer.ParseReleaseName(r.Title)
+			allReleases = append(allReleases, indexer.Release{
+				Title:        r.Title,
+				Size:         r.Size,
+				Quality:      parsed.Quality,
+				Tags:         parsed.Tags,
+				Indexer:      idx.Name,
+				DownloadType: "torrent",
+				Seeders:      r.Seeders,
+				Leechers:     r.Leechers,
+				TopicID:      r.TopicID,
+			})
+		}
+	}
+	return allReleases
+}
+
 func (s *Server) loadIndexers() []indexer.IndexerConfig {
-	rows, err := s.db.Query(`SELECT id, name, url, api_key, priority, enabled FROM indexers WHERE enabled = TRUE ORDER BY priority DESC`)
+	rows, err := s.db.Query(`SELECT id, name, url, api_key, priority, enabled, COALESCE(type,'newznab'), COALESCE(username,''), COALESCE(password,''), COALESCE(content_types,'["movie","series","anime","music"]') FROM indexers WHERE enabled = TRUE ORDER BY priority DESC`)
 	if err != nil {
 		return nil
 	}
@@ -373,8 +543,13 @@ func (s *Server) loadIndexers() []indexer.IndexerConfig {
 	var configs []indexer.IndexerConfig
 	for rows.Next() {
 		var c indexer.IndexerConfig
-		if err := rows.Scan(&c.ID, &c.Name, &c.URL, &c.APIKey, &c.Priority, &c.Enabled); err != nil {
+		var contentTypesJSON string
+		if err := rows.Scan(&c.ID, &c.Name, &c.URL, &c.APIKey, &c.Priority, &c.Enabled, &c.Type, &c.Username, &c.Password, &contentTypesJSON); err != nil {
 			continue
+		}
+		json.Unmarshal([]byte(contentTypesJSON), &c.ContentTypes)
+		if c.Type == "" {
+			c.Type = "newznab"
 		}
 		configs = append(configs, c)
 	}

@@ -13,6 +13,8 @@ import (
 	"mediaforge/internal/indexer"
 	"mediaforge/internal/metadata"
 	"mediaforge/internal/postprocess"
+	"mediaforge/internal/qbt"
+	"mediaforge/internal/rutracker"
 	"mediaforge/internal/scanner"
 )
 
@@ -35,6 +37,15 @@ type Server struct {
 	imgCache    *imageCache
 	mux         *http.ServeMux
 
+	// Music clients
+	musicbrainz *metadata.MusicBrainzClient
+	coverart    *metadata.CoverArtClient
+	lastfm      *metadata.LastFMClient
+
+	// Torrent clients
+	qbt       *qbt.Client
+	rutracker *rutracker.Client
+
 	// AI assistant
 	aiOpenRouter *ai.OpenRouterClient
 	aiJikan      *ai.JikanClient
@@ -54,6 +65,11 @@ func New(
 	sc *scanner.Scanner,
 	proxyClient *http.Client,
 	directClient *http.Client,
+	mb *metadata.MusicBrainzClient,
+	ca *metadata.CoverArtClient,
+	lfm *metadata.LastFMClient,
+	qbtClient *qbt.Client,
+	rtClient *rutracker.Client,
 ) *Server {
 	s := &Server{
 		db:           db,
@@ -69,6 +85,11 @@ func New(
 		directClient: directClient,
 		imgCache:     newImageCache(cfg.ConfigDir),
 		mux:          http.NewServeMux(),
+		musicbrainz:  mb,
+		coverart:     ca,
+		lastfm:       lfm,
+		qbt:          qbtClient,
+		rutracker:    rtClient,
 	}
 
 	// Initialize AI clients if configured

@@ -17,7 +17,8 @@
 		extracting: { bg: 'var(--status-searching-bg)', border: 'var(--status-searching-border)', text: 'var(--status-searching)' },
 		completed: { bg: 'var(--status-available-bg)', border: 'var(--status-available-border)', text: 'var(--status-available)' },
 		failed: { bg: 'var(--danger-bg)', border: 'var(--danger-border)', text: 'var(--danger)' },
-		imported: { bg: 'var(--status-available-bg)', border: 'var(--status-available-border)', text: 'var(--status-available)' }
+		imported: { bg: 'var(--status-available-bg)', border: 'var(--status-available-border)', text: 'var(--status-available)' },
+		seeding: { bg: 'var(--success-bg)', border: 'var(--success)', text: 'var(--success)' }
 	};
 
 	$: style = colors[status] || colors.unavailable;

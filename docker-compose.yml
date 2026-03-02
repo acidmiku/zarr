@@ -10,6 +10,7 @@ services:
       - ./data/config:/config
       - ./data/media:/data/media
       - ./data/usenet:/data/usenet
+      - ./data/torrents:/data/torrents
       - ./data/sabnzbd-config/Downloads:/sabnzbd-downloads
     environment:
       - TZ=Etc/UTC
@@ -35,6 +36,26 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+    networks:
+      - zarr-net
+    restart: unless-stopped
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    ports:
+      - "9090:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./data/qbittorrent-config:/config
+      - ./data/torrents:/data/torrents
+      - ./data/media:/data/media
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - WEBUI_PORT=8080
     networks:
       - zarr-net
     restart: unless-stopped

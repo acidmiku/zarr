@@ -7,7 +7,7 @@ COPY ui/ ./
 RUN npm run build
 
 # Stage 2: Build backend
-FROM golang:1.22-alpine AS backend
+FROM golang:1.24-alpine AS backend
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 COPY go.mod ./
