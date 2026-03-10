@@ -109,56 +109,116 @@
 </script>
 
 <style>
-	.page-header { margin-bottom: 1rem; }
-	h1 { font-size: 1.5rem; font-weight: 700; }
+	/* --- Stagger animation for list items --- */
+	@keyframes stagger-in {
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
 
+	/* --- Page header --- */
+	.page-header {
+		margin-bottom: 1.5rem;
+	}
+
+	h1 {
+		font-family: var(--font-display), sans-serif;
+		font-size: 1.75rem;
+		font-weight: 800;
+		letter-spacing: -0.02em;
+		color: var(--text-primary);
+	}
+
+	/* --- Tab selector: glass background with accent active state --- */
 	.tabs {
 		display: flex;
 		gap: 0.25rem;
-		background: var(--bg-surface);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		border-radius: 8px;
-		padding: 3px;
-		margin-bottom: 1.25rem;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border-radius: var(--radius-md, 10px);
+		padding: 4px;
+		margin-bottom: 1.5rem;
 		width: fit-content;
 	}
 
 	.tabs button {
-		padding: 0.4rem 1.25rem;
+		padding: 0.45rem 1.35rem;
 		border: none;
 		background: transparent;
 		color: var(--text-secondary);
-		border-radius: 6px;
+		border-radius: calc(var(--radius-md, 10px) - 2px);
+		font-family: var(--font-display), sans-serif;
 		font-size: 0.85rem;
-		font-weight: 500;
+		font-weight: 600;
+		letter-spacing: -0.01em;
 		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+
+	.tabs button:hover:not(.active) {
+		color: var(--text-primary);
+		background: rgba(255, 255, 255, 0.04);
 	}
 
 	.tabs button.active {
-		background: var(--bg-active);
-		color: var(--text-primary);
+		background: var(--accent);
+		color: var(--accent-contrast, #fff);
+		box-shadow: 0 1px 4px rgba(var(--accent-rgb, 99, 102, 241), 0.3);
 	}
 
+	/* --- History list --- */
 	.history {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.5rem;
 	}
 
+	/* --- Activity items: glass panels with timeline accent border --- */
 	.activity-item {
 		display: flex;
 		align-items: center;
-		gap: 0.75rem;
-		padding: 0.65rem 1rem;
-		background: var(--bg-surface);
-		border-radius: 6px;
-		border: 1px solid var(--border);
+		gap: 0.85rem;
+		padding: 0.75rem 1rem;
+		background: var(--glass-bg);
+		border-radius: var(--radius-md, 10px);
+		border: 1px solid var(--glass-border);
+		border-left: 3px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		transition: all 0.2s ease;
+		animation: stagger-in 0.35s ease both;
 	}
 
+	/* Stagger delay for each item */
+	.activity-item:nth-child(1) { animation-delay: 0.00s; }
+	.activity-item:nth-child(2) { animation-delay: 0.04s; }
+	.activity-item:nth-child(3) { animation-delay: 0.08s; }
+	.activity-item:nth-child(4) { animation-delay: 0.12s; }
+	.activity-item:nth-child(5) { animation-delay: 0.16s; }
+	.activity-item:nth-child(6) { animation-delay: 0.20s; }
+	.activity-item:nth-child(7) { animation-delay: 0.24s; }
+	.activity-item:nth-child(8) { animation-delay: 0.28s; }
+	.activity-item:nth-child(9) { animation-delay: 0.32s; }
+	.activity-item:nth-child(10) { animation-delay: 0.36s; }
+	.activity-item:nth-child(n+11) { animation-delay: 0.40s; }
+
+	.activity-item:hover {
+		background: rgba(255, 255, 255, 0.06);
+		border-left-color: var(--accent);
+		transform: translateX(2px);
+	}
+
+	/* --- Status icons: semantic colors --- */
 	.act-icon {
-		width: 28px;
-		height: 28px;
+		width: 30px;
+		height: 30px;
 		border-radius: 50%;
 		display: flex;
 		align-items: center;
@@ -168,79 +228,156 @@
 		background: var(--bg-elevated);
 		color: var(--text-secondary);
 		flex-shrink: 0;
+		transition: transform 0.2s ease;
 	}
 
-	.act-success { background: var(--success-bg); color: var(--success); }
-	.act-warning { background: var(--info-bg); color: var(--info); }
-	.act-danger { background: var(--danger-bg); color: var(--danger); }
+	.activity-item:hover .act-icon {
+		transform: scale(1.08);
+	}
 
-	.act-info { flex: 1; min-width: 0; }
+	.act-success {
+		background: var(--success-bg);
+		color: var(--success);
+		box-shadow: 0 0 8px rgba(var(--success-rgb, 34, 197, 94), 0.15);
+	}
+
+	.act-warning {
+		background: var(--info-bg);
+		color: var(--info);
+		box-shadow: 0 0 8px rgba(var(--info-rgb, 59, 130, 246), 0.15);
+	}
+
+	.act-danger {
+		background: var(--danger-bg);
+		color: var(--danger);
+		box-shadow: 0 0 8px rgba(var(--danger-rgb, 239, 68, 68), 0.15);
+	}
+
+	/* --- Activity info --- */
+	.act-info {
+		flex: 1;
+		min-width: 0;
+	}
 
 	.act-detail {
 		display: flex;
+		align-items: center;
 		gap: 0.5rem;
 		font-size: 0.875rem;
+		flex-wrap: wrap;
 	}
 
 	.act-action {
 		text-transform: capitalize;
-		font-weight: 500;
+		font-family: var(--font-display), sans-serif;
+		font-weight: 700;
+		letter-spacing: -0.01em;
 	}
 
 	.act-media {
 		color: var(--accent);
+		font-weight: 500;
 	}
 
+	/* --- Type badge: glass pill style --- */
 	.act-type-badge {
-		background: var(--info-bg);
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
 		color: var(--info);
-		padding: 1px 5px;
-		border-radius: 3px;
-		font-size: 0.65rem;
+		padding: 2px 8px;
+		border-radius: 999px;
+		font-size: 0.6rem;
 		font-weight: 600;
 		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
 	}
 
 	.act-type-badge.torrent {
-		background: var(--success-bg);
+		background: rgba(var(--success-rgb, 34, 197, 94), 0.1);
+		border-color: rgba(var(--success-rgb, 34, 197, 94), 0.2);
 		color: var(--success);
 	}
 
 	.act-details {
 		font-size: 0.75rem;
 		color: var(--text-muted);
-		margin-top: 2px;
+		margin-top: 3px;
+		line-height: 1.4;
 	}
 
 	.act-time {
-		font-size: 0.75rem;
+		font-size: 0.7rem;
 		color: var(--text-muted);
 		flex-shrink: 0;
+		font-variant-numeric: tabular-nums;
+		opacity: 0.7;
+		transition: opacity 0.2s ease;
 	}
 
+	.activity-item:hover .act-time {
+		opacity: 1;
+	}
+
+	/* --- Empty state: centered icon + text --- */
 	.empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
 		text-align: center;
 		color: var(--text-muted);
-		padding: 3rem;
+		padding: 4rem 2rem;
+		font-size: 0.95rem;
+		gap: 0.5rem;
 	}
 
+	.empty::before {
+		content: '○';
+		font-size: 2.5rem;
+		opacity: 0.25;
+		display: block;
+		margin-bottom: 0.25rem;
+	}
+
+	/* --- Pagination: glass pill buttons --- */
 	.pagination {
 		display: flex;
 		justify-content: center;
 		align-items: center;
 		gap: 1rem;
-		margin-top: 1.5rem;
+		margin-top: 2rem;
 	}
 
 	.pagination button {
-		padding: 0.4rem 1rem;
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-subtle);
+		padding: 0.45rem 1.15rem;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
 		color: var(--text-primary);
-		border-radius: 6px;
+		border-radius: 999px;
 		cursor: pointer;
+		font-size: 0.8rem;
+		font-weight: 600;
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
+		transition: all 0.2s ease;
 	}
 
-	.pagination button:disabled { opacity: 0.3; cursor: default; }
-	.pagination span { color: var(--text-secondary); font-size: 0.85rem; }
+	.pagination button:hover:not(:disabled) {
+		background: var(--accent);
+		color: var(--accent-contrast, #fff);
+		border-color: var(--accent);
+	}
+
+	.pagination button:disabled {
+		opacity: 0.25;
+		cursor: default;
+	}
+
+	.pagination span {
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		font-variant-numeric: tabular-nums;
+	}
 </style>

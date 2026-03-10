@@ -10,8 +10,6 @@
 	let loaded = false;
 	let activityCount = 0;
 	let countInterval;
-	let themePickerOpen = false;
-	let themePickerEl;
 
 	onMount(async () => {
 		try {
@@ -21,7 +19,7 @@
 
 			if (status.setup_complete) {
 				updateActivityCount();
-				countInterval = setInterval(updateActivityCount, 10000); // Update every 10s
+				countInterval = setInterval(updateActivityCount, 10000);
 			}
 		} catch {
 			showSetup = true;
@@ -35,7 +33,6 @@
 
 	async function updateActivityCount() {
 		try {
-			// Get active downloads count (API returns array directly)
 			const downloads = await api.getDownloads();
 			if (Array.isArray(downloads)) {
 				activityCount = downloads.filter(d =>
@@ -44,8 +41,7 @@
 			} else {
 				activityCount = 0;
 			}
-		} catch (err) {
-			// Silently fail
+		} catch {
 			activityCount = 0;
 		}
 	}
@@ -56,20 +52,6 @@
 		updateActivityCount();
 		countInterval = setInterval(updateActivityCount, 10000);
 	}
-
-	function handleClickOutside(e) {
-		if (themePickerOpen && themePickerEl && !themePickerEl.contains(e.target)) {
-			themePickerOpen = false;
-		}
-	}
-
-	function pickTheme(id) {
-		setTheme(id);
-		themePickerOpen = false;
-	}
-
-	$: darkThemes = THEMES.filter(t => t.group === 'dark');
-	$: lightThemes = THEMES.filter(t => t.group === 'light');
 
 	$: currentPath = $page.url.pathname;
 
@@ -82,34 +64,37 @@
 		{ path: '/assistant', label: 'Assistant', icon: '✦' },
 		{ path: '/settings', label: 'Settings', icon: '⚙' }
 	];
+
+	function isActive(path) {
+		if (path === '/') return currentPath === '/';
+		return currentPath.startsWith(path);
+	}
 </script>
 
-<svelte:window on:click={handleClickOutside} />
-
 {#if !loaded}
-	<div class="loading-screen">
-		<div class="spinner"></div>
-		<p>Loading Zarr...</p>
+	<div class="boot-screen">
+		<div class="boot-icon">⚒</div>
 	</div>
 {:else if showSetup}
 	<SetupWizard on:complete={onSetupComplete} />
 {:else}
-	<div class="app">
-		<nav class="sidebar">
-			<div class="sidebar-glow"></div>
-			<div class="logo">
+	<!-- Sidebar -->
+	<nav class="sidebar" aria-label="Main navigation">
+		<div class="sidebar-inner">
+			<a href="/" class="sidebar-logo">
 				<span class="logo-icon">⚒</span>
 				<span class="logo-text">Zarr</span>
-			</div>
+			</a>
+
 			<div class="nav-links">
 				{#each navItems as item}
 					<a
 						href={item.path}
-						class="nav-link"
-						class:active={currentPath === item.path || (item.path !== '/' && currentPath.startsWith(item.path))}
+						class="nav-item"
+						class:active={isActive(item.path)}
 					>
-						{#if currentPath === item.path || (item.path !== '/' && currentPath.startsWith(item.path))}
-							<span class="nav-active-indicator"></span>
+						{#if isActive(item.path)}
+							<span class="active-bar"></span>
 						{/if}
 						<span class="nav-icon">{item.icon}</span>
 						<span class="nav-label">{item.label}</span>
@@ -119,388 +104,362 @@
 					</a>
 				{/each}
 			</div>
-			<div class="sidebar-footer" bind:this={themePickerEl}>
-				{#if themePickerOpen}
-					<div class="theme-popover">
-						<div class="theme-group">
-							<span class="theme-group-label">Dark</span>
-							{#each darkThemes as t}
-								<button class="theme-option" class:active={$theme === t.id} on:click={() => pickTheme(t.id)}>
-									<span class="theme-swatch" style="background: {t.swatch}"></span>
-									<span class="theme-name">{t.label}</span>
-									{#if $theme === t.id}<span class="theme-check">✓</span>{/if}
-								</button>
-							{/each}
-						</div>
-						<div class="theme-group">
-							<span class="theme-group-label">Light</span>
-							{#each lightThemes as t}
-								<button class="theme-option" class:active={$theme === t.id} on:click={() => pickTheme(t.id)}>
-									<span class="theme-swatch" style="background: {t.swatch}"></span>
-									<span class="theme-name">{t.label}</span>
-									{#if $theme === t.id}<span class="theme-check">✓</span>{/if}
-								</button>
-							{/each}
-						</div>
-					</div>
-				{/if}
-				<button class="theme-toggle" on:click={() => themePickerOpen = !themePickerOpen} title="Change theme">
-					◑
-				</button>
+
+			<div class="sidebar-footer">
+				<div class="theme-swatches">
+					{#each THEMES as t}
+						<button
+							class="swatch"
+							class:active={$theme === t.id}
+							style="--sw: {t.swatch}"
+							title={t.label}
+							on:click={() => setTheme(t.id)}
+						></button>
+					{/each}
+				</div>
 			</div>
-		</nav>
-		<main class="content">
-			<slot />
-		</main>
-	</div>
+		</div>
+	</nav>
+
+	<!-- Mobile bottom nav -->
+	<nav class="mobile-nav">
+		{#each navItems.slice(0, 5) as item}
+			<a href={item.path} class="mobile-item" class:active={isActive(item.path)}>
+				<span class="mobile-icon">{item.icon}</span>
+				{#if item.path === '/activity' && activityCount > 0}
+					<span class="mobile-badge">{activityCount}</span>
+				{/if}
+			</a>
+		{/each}
+	</nav>
+
+	<main class="content">
+		<slot />
+	</main>
 {/if}
 
 <!-- Notifications -->
 <div class="notifications">
 	{#each $notifications as notif (notif.id)}
-		<div class="notif notif-{notif.type}">{notif.message}</div>
+		<div class="notif notif-{notif.type}">
+			<span class="notif-dot"></span>
+			{notif.message}
+		</div>
 	{/each}
 </div>
 
 <style>
-	.loading-screen {
+	/* ===== Boot ===== */
+	.boot-screen {
+		position: fixed;
+		inset: 0;
 		display: flex;
-		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		height: 100vh;
-		gap: 1rem;
-		color: var(--text-muted);
+		background: var(--bg-base);
+	}
+	.boot-icon {
+		font-size: 3rem;
+		opacity: 0.25;
+		animation: pulse 2s ease-in-out infinite;
 	}
 
-	.spinner {
-		width: 32px;
-		height: 32px;
-		border: 3px solid var(--border);
-		border-top-color: var(--accent);
-		border-radius: 50%;
-		animation: spin 0.8s linear infinite;
-	}
-
-	@keyframes spin { to { transform: rotate(360deg); } }
-
-	.app {
-		display: flex;
-		min-height: 100vh;
-	}
-
-	/* ---- Sidebar ---- */
+	/* ===== Sidebar ===== */
 	.sidebar {
-		width: 220px;
 		position: fixed;
 		top: 0;
 		left: 0;
 		bottom: 0;
+		width: var(--sidebar-width);
 		z-index: 100;
+		transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+		overflow: hidden;
+	}
+	.sidebar:hover {
+		width: var(--sidebar-expanded);
+	}
+
+	.sidebar-inner {
+		height: 100%;
 		display: flex;
 		flex-direction: column;
+		padding: 0.5rem;
 		background: var(--glass-bg);
 		backdrop-filter: blur(var(--glass-blur));
 		-webkit-backdrop-filter: blur(var(--glass-blur));
 		border-right: 1px solid var(--glass-border);
-		overflow: hidden;
 	}
 
-	.sidebar-glow {
-		position: absolute;
-		top: -60px;
-		left: 30%;
-		width: 120px;
-		height: 120px;
-		background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
-		pointer-events: none;
-		z-index: 0;
-	}
-
-	.logo {
-		padding: 1.25rem 1rem;
+	/* Logo */
+	.sidebar-logo {
 		display: flex;
 		align-items: center;
-		gap: 0.6rem;
-		border-bottom: 1px solid var(--border);
-		position: relative;
-		z-index: 1;
+		gap: 0.75rem;
+		padding: 1rem 0.85rem;
+		margin-bottom: 0.25rem;
+		text-decoration: none;
+		white-space: nowrap;
+		overflow: hidden;
 	}
-
-	.logo-icon { font-size: 1.5rem; }
+	.logo-icon {
+		font-size: 1.5rem;
+		flex-shrink: 0;
+		width: 36px;
+		text-align: center;
+		filter: drop-shadow(0 0 12px var(--accent-glow));
+	}
 	.logo-text {
 		font-family: var(--font-display);
-		font-size: 1.1rem;
-		font-weight: 700;
+		font-size: 1.25rem;
+		font-weight: 800;
+		letter-spacing: -0.03em;
 		background: linear-gradient(135deg, var(--accent), var(--accent-hover));
 		-webkit-background-clip: text;
 		-webkit-text-fill-color: transparent;
 		background-clip: text;
-		text-shadow: none;
+		opacity: 0;
+		transform: translateX(-6px);
+		transition: opacity 0.25s ease 0.1s, transform 0.3s ease 0.1s;
+	}
+	.sidebar:hover .logo-text {
+		opacity: 1;
+		transform: translateX(0);
 	}
 
+	/* Nav links */
 	.nav-links {
-		padding: 0.75rem 0.5rem;
+		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: 0.2rem;
-		flex: 1;
-		position: relative;
-		z-index: 1;
+		gap: 2px;
+		padding: 0.25rem 0;
 	}
-
-	.nav-link {
+	.nav-item {
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
-		padding: 0.6rem 0.85rem;
+		padding: 0.65rem 0.85rem;
 		border-radius: var(--radius-sm);
-		color: var(--text-secondary);
-		transition: all 0.2s ease;
-		font-family: var(--font-body);
-		font-size: 0.88rem;
-		font-weight: 500;
-		position: relative;
+		color: var(--text-muted);
+		text-decoration: none;
+		white-space: nowrap;
 		overflow: hidden;
+		position: relative;
+		transition: color 0.2s, background 0.2s;
 	}
-
-	.nav-link:hover {
+	.nav-item:hover {
 		color: var(--text-primary);
 		background: var(--bg-hover);
 	}
-
-	.nav-link.active {
-		color: var(--text-primary);
-		background: var(--bg-active);
-	}
-
-	.nav-link.active .nav-icon {
+	.nav-item.active {
 		color: var(--accent);
+		background: var(--accent-subtle);
 	}
 
-	.nav-active-indicator {
+	.active-bar {
 		position: absolute;
 		left: 0;
-		top: 20%;
-		bottom: 20%;
+		top: 50%;
+		transform: translateY(-50%);
 		width: 3px;
-		border-radius: 0 2px 2px 0;
+		height: 20px;
 		background: var(--accent);
+		border-radius: 0 3px 3px 0;
 		box-shadow: 0 0 12px var(--accent-glow), 0 0 4px var(--accent);
 	}
 
 	.nav-icon {
-		font-size: 1.1rem;
-		width: 1.5rem;
+		font-size: 1.15rem;
+		flex-shrink: 0;
+		width: 36px;
 		text-align: center;
-		transition: color 0.2s;
+		transition: transform 0.15s;
 	}
-
+	.nav-item:hover .nav-icon {
+		transform: scale(1.1);
+	}
+	.nav-label {
+		font-size: 0.85rem;
+		font-weight: 500;
+		opacity: 0;
+		transform: translateX(-6px);
+		transition: opacity 0.2s ease 0.06s, transform 0.2s ease 0.06s;
+	}
+	.sidebar:hover .nav-label {
+		opacity: 1;
+		transform: translateX(0);
+	}
 	.nav-badge {
-		margin-left: auto;
-		padding: 0.15rem 0.45rem;
+		position: absolute;
+		top: 6px;
+		right: 10px;
 		background: var(--accent);
 		color: var(--text-inverse);
-		font-size: 0.7rem;
+		font-size: 0;
 		font-weight: 700;
-		border-radius: 10px;
-		min-width: 20px;
-		text-align: center;
-		box-shadow: 0 0 8px var(--accent-glow);
-	}
-
-	.sidebar-footer {
-		padding: 0.75rem;
-		border-top: 1px solid var(--border);
-		display: flex;
-		justify-content: center;
-		position: relative;
-		z-index: 1;
-	}
-
-	.theme-toggle {
-		width: 36px;
-		height: 36px;
-		border-radius: 50%;
-		border: 1px solid var(--border);
-		background: var(--bg-hover);
-		color: var(--text-secondary);
-		font-size: 1.1rem;
+		min-width: 8px;
+		height: 8px;
+		padding: 0;
+		border-radius: 8px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		cursor: pointer;
-		transition: all 0.2s;
+		box-shadow: 0 0 8px var(--accent-glow);
+		transition: all 0.2s ease 0.06s;
 	}
-	.theme-toggle:hover {
-		color: var(--accent);
-		border-color: var(--accent);
-		box-shadow: var(--shadow-glow);
+	.sidebar:hover .nav-badge {
+		position: static;
+		margin-left: auto;
+		font-size: 0.65rem;
+		min-width: 18px;
+		height: 18px;
+		padding: 0 5px;
 	}
 
-	/* ---- Theme Popover ---- */
-	.theme-popover {
-		position: absolute;
-		bottom: calc(100% + 0.5rem);
-		left: 50%;
-		transform: translateX(-50%);
-		width: 180px;
+	/* Footer — theme swatches */
+	.sidebar-footer {
+		padding: 0.75rem 0.5rem;
+		border-top: 1px solid var(--border);
+	}
+	.theme-swatches {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		justify-content: center;
+	}
+	.swatch {
+		width: 16px;
+		height: 16px;
+		border-radius: 50%;
+		background: var(--sw);
+		border: 2px solid transparent;
+		transition: all 0.2s;
+		opacity: 0.5;
+		flex-shrink: 0;
+		cursor: pointer;
+	}
+	.swatch:hover {
+		opacity: 1;
+		transform: scale(1.2);
+	}
+	.swatch.active {
+		opacity: 1;
+		border-color: var(--text-primary);
+		box-shadow: 0 0 10px var(--sw);
+	}
+
+	/* ===== Main content ===== */
+	.content {
+		margin-left: var(--sidebar-width);
+		padding: 2rem 2.5rem;
+		min-height: 100vh;
+		position: relative;
+		z-index: 1;
+		animation: fadeIn 0.3s ease;
+	}
+
+	/* ===== Mobile nav ===== */
+	.mobile-nav {
+		display: none;
+		position: fixed;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		height: 58px;
 		background: var(--glass-bg);
 		backdrop-filter: blur(var(--glass-blur));
 		-webkit-backdrop-filter: blur(var(--glass-blur));
-		border: 1px solid var(--glass-border);
-		border-radius: var(--radius-md);
-		padding: 0.5rem;
-		box-shadow: var(--shadow-lg);
-		z-index: 200;
-		display: flex;
-		flex-direction: column;
-		gap: 0.25rem;
-		animation: popoverIn 0.15s ease;
-	}
-
-	@keyframes popoverIn {
-		from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-		to { opacity: 1; transform: translateX(-50%) translateY(0); }
-	}
-
-	.theme-group {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.theme-group + .theme-group {
-		border-top: 1px solid var(--border-subtle);
-		padding-top: 0.35rem;
-		margin-top: 0.2rem;
-	}
-
-	.theme-group-label {
-		font-size: 0.65rem;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--text-muted);
-		padding: 0.2rem 0.5rem;
-		font-family: var(--font-display);
-	}
-
-	.theme-option {
-		display: flex;
+		border-top: 1px solid var(--glass-border);
+		z-index: 100;
+		justify-content: space-around;
 		align-items: center;
-		gap: 0.5rem;
-		padding: 0.4rem 0.5rem;
-		border: none;
-		background: transparent;
-		border-radius: var(--radius-sm);
-		color: var(--text-secondary);
-		font-size: 0.82rem;
-		font-family: var(--font-body);
-		cursor: pointer;
-		transition: all 0.15s ease;
-		width: 100%;
-		text-align: left;
+		padding: 0 0.5rem;
 	}
-
-	.theme-option:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
+	.mobile-item {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
+		padding: 0.5rem 0.75rem;
+		color: var(--text-muted);
+		text-decoration: none;
+		position: relative;
+		transition: color 0.15s;
 	}
-
-	.theme-option.active {
-		color: var(--text-primary);
-	}
-
-	.theme-swatch {
-		width: 12px;
-		height: 12px;
-		border-radius: 50%;
-		flex-shrink: 0;
-		box-shadow: 0 0 0 1px rgba(255,255,255,0.1), 0 0 6px rgba(0,0,0,0.2);
-	}
-
-	.theme-name {
-		flex: 1;
-	}
-
-	.theme-check {
-		font-size: 0.75rem;
+	.mobile-item.active {
 		color: var(--accent);
 	}
-
-	/* ---- Content ---- */
-	.content {
-		flex: 1;
-		margin-left: 220px;
-		padding: 1.5rem 2rem;
-		min-height: 100vh;
+	.mobile-icon {
+		font-size: 1.2rem;
+	}
+	.mobile-badge {
+		position: absolute;
+		top: 2px;
+		right: 4px;
+		background: var(--accent);
+		color: var(--text-inverse);
+		font-size: 0.55rem;
+		font-weight: 700;
+		min-width: 14px;
+		height: 14px;
+		padding: 0 3px;
+		border-radius: 7px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
 	}
 
-	/* ---- Notifications ---- */
+	/* ===== Notifications ===== */
 	.notifications {
 		position: fixed;
-		bottom: 1rem;
-		right: 1rem;
+		top: 1.25rem;
+		right: 1.25rem;
 		display: flex;
 		flex-direction: column;
 		gap: 0.5rem;
 		z-index: 10001;
-	}
-
-	.notif {
-		padding: 0.75rem 1.25rem;
-		border-radius: var(--radius-md);
-		font-size: 0.85rem;
-		font-family: var(--font-body);
-		animation: slideIn 0.25s ease;
 		max-width: 360px;
-		backdrop-filter: blur(16px);
-		-webkit-backdrop-filter: blur(16px);
 	}
-
-	.notif-success { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--success); }
-	.notif-error { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger); }
-	.notif-info { background: var(--info-bg); border: 1px solid var(--info-border); color: var(--info); }
-
-	@keyframes slideIn {
-		from { transform: translateX(100%); opacity: 0; }
-		to { transform: translateX(0); opacity: 1; }
+	.notif {
+		display: flex;
+		align-items: center;
+		gap: 0.6rem;
+		padding: 0.7rem 1rem;
+		border-radius: var(--radius-md);
+		backdrop-filter: blur(20px);
+		-webkit-backdrop-filter: blur(20px);
+		font-size: 0.82rem;
+		font-weight: 500;
+		animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+		box-shadow: var(--shadow-md);
+		border: 1px solid;
 	}
+	.notif-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: currentColor;
+		flex-shrink: 0;
+	}
+	.notif-success { background: var(--success-bg); border-color: var(--success-border); color: var(--success); }
+	.notif-error { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
+	.notif-info { background: var(--info-bg); border-color: var(--info-border); color: var(--info); }
 
-	/* ---- Mobile ---- */
+	/* ===== Responsive ===== */
 	@media (max-width: 768px) {
-		.sidebar {
-			width: 100%;
-			height: auto;
-			position: fixed;
-			top: auto;
-			bottom: 0;
-			flex-direction: row;
-			border-right: none;
-			border-top: 1px solid var(--glass-border);
-		}
-
-		.logo, .sidebar-footer, .sidebar-glow { display: none; }
-
-		.nav-links {
-			flex-direction: row;
-			width: 100%;
-			justify-content: space-around;
-			padding: 0.5rem;
-		}
-
-		.nav-label { display: none; }
-		.nav-active-indicator { display: none; }
-
-		.nav-link {
-			padding: 0.5rem 0.75rem;
-			justify-content: center;
-		}
-
+		.sidebar { display: none; }
+		.mobile-nav { display: flex; }
 		.content {
 			margin-left: 0;
-			padding: 1rem;
-			padding-bottom: 4rem;
+			padding: 1.25rem;
+			padding-bottom: calc(58px + 1.25rem);
+		}
+		.notifications {
+			top: auto;
+			bottom: calc(58px + 0.75rem);
+			right: 0.75rem;
+			left: 0.75rem;
+			max-width: none;
 		}
 	}
 </style>

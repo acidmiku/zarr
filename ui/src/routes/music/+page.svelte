@@ -171,7 +171,7 @@
 				{#if loadingArtistAlbums}
 					<div class="loading">Loading albums...</div>
 				{:else}
-					<div class="grid music-grid">
+					<div class="grid music-grid stagger-grid">
 						{#each artistAlbums as item}
 							<!-- svelte-ignore a11y-click-events-have-key-events -->
 							<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
@@ -221,7 +221,7 @@
 			{#if results.length > 0}
 				<h2 class="section-title">{results.length} results</h2>
 			{/if}
-			<div class="grid music-grid">
+			<div class="grid music-grid stagger-grid">
 				{#each displayItems as item}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
@@ -255,7 +255,7 @@
 		<!-- Trending (no search query) -->
 		{:else if !searchQuery && !loading}
 			<h2 class="section-title">Trending Albums</h2>
-			<div class="grid music-grid">
+			<div class="grid music-grid stagger-grid">
 				{#each trending as item}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
 					<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
@@ -299,7 +299,7 @@
 			{#if libraryAlbums.length === 0}
 				<div class="empty">No albums in library{libraryFilter !== 'all' ? ` with status "${libraryFilter}"` : ''}</div>
 			{:else}
-				<div class="grid music-grid">
+				<div class="grid music-grid stagger-grid">
 					{#each libraryAlbums as album}
 						<a href="/music/{album.id}" class="album-card">
 							<div class="album-cover">
@@ -367,6 +367,7 @@
 {/if}
 
 <style>
+	/* Page header */
 	.page-header {
 		display: flex;
 		align-items: center;
@@ -374,14 +375,23 @@
 		margin-bottom: 1.25rem;
 	}
 
-	h1 { font-size: 1.5rem; font-weight: 700; }
+	h1 {
+		font-family: var(--font-display);
+		font-size: 1.75rem;
+		font-weight: 800;
+		letter-spacing: -0.02em;
+	}
 
+	/* Tab selector & view toggle — glass panels */
 	.tab-selector, .view-toggle {
 		display: flex;
 		gap: 0.25rem;
-		background: var(--bg-surface);
-		border-radius: 8px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
 		padding: 3px;
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 	}
 
 	.tab-selector button, .view-toggle button {
@@ -389,31 +399,37 @@
 		border: none;
 		background: transparent;
 		color: var(--text-secondary);
-		border-radius: 6px;
+		border-radius: calc(var(--radius-md) - 2px);
 		font-size: 0.85rem;
 		font-weight: 500;
 		cursor: pointer;
+		transition: all 0.2s ease;
 	}
 
 	.tab-selector button.active, .view-toggle button.active {
 		background: var(--accent);
 		color: var(--text-inverse);
+		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
 	}
 
+	/* Search row */
 	.search-row {
 		display: flex;
 		gap: 0.75rem;
 		align-items: center;
-		margin-bottom: 1rem;
+		margin-bottom: 1.75rem;
 	}
 
 	.search-type-selector {
 		display: flex;
 		gap: 0.25rem;
-		background: var(--bg-surface);
-		border-radius: 8px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
 		padding: 3px;
 		flex-shrink: 0;
+		backdrop-filter: blur(12px);
+		-webkit-backdrop-filter: blur(12px);
 	}
 
 	.search-type-selector button {
@@ -421,26 +437,36 @@
 		border: none;
 		background: transparent;
 		color: var(--text-secondary);
-		border-radius: 6px;
+		border-radius: calc(var(--radius-md) - 2px);
 		font-size: 0.8rem;
 		font-weight: 500;
 		cursor: pointer;
+		transition: all 0.2s ease;
 	}
 
 	.search-type-selector button.active {
 		background: var(--accent);
 		color: var(--text-inverse);
+		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
 	}
 
 	.search-bar-wrap { flex: 1; }
 
+	/* Section title — editorial style */
 	.section-title {
-		font-size: 1rem;
-		font-weight: 600;
+		font-family: var(--font-display);
+		font-size: 1.05rem;
+		font-weight: 700;
+		letter-spacing: -0.02em;
 		color: var(--text-secondary);
 		margin: 1.25rem 0 0.75rem;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		font-size: 0.7rem;
+		opacity: 0.7;
 	}
 
+	/* Breadcrumb */
 	.breadcrumb {
 		margin-bottom: 0.5rem;
 	}
@@ -453,34 +479,40 @@
 		font-size: 0.85rem;
 		padding: 0;
 		margin-bottom: 0.25rem;
+		transition: opacity 0.2s ease;
 	}
 
-	.link-btn:hover { text-decoration: underline; }
+	.link-btn:hover { text-decoration: underline; opacity: 0.8; }
 
+	/* Music grid */
 	.music-grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-		gap: 1rem;
+		gap: 1.25rem;
 	}
 
+	/* Album card — glass card */
 	.album-card {
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition: transform 0.2s;
+		transition: transform 0.25s ease, box-shadow 0.25s ease;
 		text-decoration: none;
 		color: inherit;
+		overflow: hidden;
 	}
 
 	.album-card:hover {
-		transform: translateY(-4px);
+		transform: translateY(-2px);
+		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
 	}
 
 	.album-cover {
 		position: relative;
 		aspect-ratio: 1/1;
-		border-radius: 8px;
 		overflow: hidden;
 		background: var(--bg-elevated);
-		margin-bottom: 0.5rem;
 	}
 
 	.album-cover img {
@@ -536,7 +568,7 @@
 	.status-downloading { background: var(--accent); color: var(--text-inverse); }
 
 	.album-info {
-		padding: 0 0.25rem;
+		padding: 0.5rem 0.6rem;
 	}
 
 	.album-title {
@@ -578,7 +610,7 @@
 	.artist-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.35rem;
 	}
 
 	.artist-row {
@@ -586,14 +618,19 @@
 		align-items: center;
 		gap: 1rem;
 		padding: 0.75rem;
-		border-radius: 8px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
 		cursor: pointer;
 		text-decoration: none;
 		color: inherit;
+		transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
 	}
 
 	.artist-row:hover {
 		background: var(--bg-hover);
+		transform: translateY(-1px);
+		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 	}
 
 	.artist-initial {
@@ -613,7 +650,8 @@
 	.artist-info { flex: 1; min-width: 0; }
 	.artist-name { font-weight: 600; font-size: 0.9rem; }
 	.artist-meta { display: flex; gap: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
-	.arrow { color: var(--text-muted); font-size: 1.2rem; }
+	.arrow { color: var(--text-muted); font-size: 1.2rem; transition: transform 0.2s ease; }
+	.artist-row:hover .arrow { transform: translateX(2px); }
 
 	/* Library controls */
 	.library-controls {
@@ -631,30 +669,64 @@
 
 	.filter-btn {
 		padding: 0.35rem 0.75rem;
-		border: 1px solid var(--border);
-		background: var(--bg-surface);
+		border: 1px solid var(--glass-border);
+		background: var(--glass-bg);
 		color: var(--text-secondary);
 		border-radius: 20px;
 		font-size: 0.8rem;
 		cursor: pointer;
+		transition: all 0.2s ease;
 	}
 
 	.filter-btn.active {
 		background: var(--accent);
 		color: var(--text-inverse);
 		border-color: var(--accent);
+		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
 	}
 
-	.loading, .empty {
+	/* Loading & empty states */
+	.loading {
 		text-align: center;
 		color: var(--text-muted);
 		padding: 3rem;
 	}
 
+	.empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		color: var(--text-muted);
+		padding: 3rem;
+		gap: 0.75rem;
+	}
+
+	.empty::before {
+		content: '\1F3B5';
+		font-size: 2.5rem;
+		opacity: 0.35;
+	}
+
+	/* Modal — backdrop blur + scaleIn animation */
+	@keyframes scaleIn {
+		from {
+			opacity: 0;
+			transform: scale(0.95);
+		}
+		to {
+			opacity: 1;
+			transform: scale(1);
+		}
+	}
+
 	.modal-overlay {
 		position: fixed;
 		inset: 0;
-		background: var(--bg-overlay);
+		background: rgba(0, 0, 0, 0.5);
+		backdrop-filter: blur(8px);
+		-webkit-backdrop-filter: blur(8px);
 		z-index: 200;
 		padding: 2rem;
 		overflow-y: auto;
@@ -665,15 +737,16 @@
 		max-width: 700px;
 		margin: 0 auto;
 		position: relative;
-		border-radius: 12px;
+		border-radius: var(--radius-md);
+		animation: scaleIn 0.25s ease forwards;
 	}
 
 	.modal-close {
 		position: absolute;
 		top: 12px;
 		right: 12px;
-		background: var(--bg-overlay);
-		border: none;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
 		color: var(--text-primary);
 		width: 32px;
 		height: 32px;
@@ -681,6 +754,11 @@
 		font-size: 1rem;
 		z-index: 10;
 		cursor: pointer;
+		transition: background 0.2s ease;
+	}
+
+	.modal-close:hover {
+		background: var(--bg-hover);
 	}
 
 	@media (max-width: 768px) {

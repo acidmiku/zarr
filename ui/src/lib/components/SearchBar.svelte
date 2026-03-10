@@ -40,23 +40,29 @@
 	.search-bar {
 		display: flex;
 		align-items: center;
-		background: var(--bg-input);
-		border: 1px solid var(--border-subtle);
-		border-radius: 10px;
-		padding: 0 1rem;
-		transition: border-color 0.15s;
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
+		padding: 0 1.25rem;
+		transition: all 0.25s ease;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.search-bar:focus-within {
 		border-color: var(--accent);
+		box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-sm);
 	}
 
 	.search-icon {
 		color: var(--text-muted);
-		font-size: 1.2rem;
-		margin-right: 0.5rem;
+		font-size: 1.15rem;
+		margin-right: 0.6rem;
+		transition: color 0.2s;
+	}
+
+	.search-bar:focus-within .search-icon {
+		color: var(--accent);
 	}
 
 	input {
@@ -65,8 +71,9 @@
 		border: none;
 		outline: none;
 		color: var(--text-primary);
-		padding: 0.75rem 0;
-		font-size: 0.95rem;
+		padding: 0.85rem 0;
+		font-size: 0.9rem;
+		font-family: var(--font-body);
 	}
 
 	input::placeholder {
@@ -77,12 +84,14 @@
 		background: none;
 		border: none;
 		color: var(--text-muted);
-		font-size: 0.9rem;
+		font-size: 0.85rem;
 		padding: 4px;
 		transition: all 0.2s ease;
+		border-radius: 4px;
 	}
 
 	.clear-btn:hover {
-		color: var(--text-secondary);
+		color: var(--text-primary);
+		background: var(--bg-hover);
 	}
 </style>

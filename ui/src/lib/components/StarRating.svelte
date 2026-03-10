@@ -29,26 +29,37 @@
 <style>
 	.stars {
 		display: inline-flex;
-		gap: 2px;
+		align-items: center;
+		gap: 0.15rem;
+		padding: 0.3rem 0.6rem;
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.star {
 		background: none;
 		border: none;
 		font-size: 1.5rem;
-		color: var(--text-dim);
+		color: var(--text-muted);
 		cursor: pointer;
-		padding: 0;
-		transition: color 0.1s;
+		padding: 0 0.05rem;
+		transition: color 0.2s ease, transform 0.2s ease, text-shadow 0.2s ease;
 		line-height: 1;
 	}
 
 	.star.filled {
 		color: var(--gold);
+		text-shadow: 0 0 8px var(--gold);
 	}
 
 	.star:hover:not(:disabled) {
 		color: var(--gold);
+		transform: scale(1.15);
+		text-shadow: 0 0 10px var(--gold);
 	}
 
 	.star:disabled {
@@ -57,5 +68,9 @@
 
 	.readonly .star {
 		cursor: default;
+	}
+
+	.readonly .star:hover:not(:disabled) {
+		transform: none;
 	}
 </style>

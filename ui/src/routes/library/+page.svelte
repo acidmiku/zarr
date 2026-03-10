@@ -63,14 +63,18 @@
 	</div>
 
 	{#if loading}
-		<div class="loading">Loading...</div>
+		<div class="loading">
+			<div class="loading-spinner"></div>
+			<span>Loading...</span>
+		</div>
 	{:else if items.length === 0}
 		<div class="empty">
+			<div class="empty-icon">📚</div>
 			<p>Your library is empty.</p>
 			<a href="/" class="btn-link">Discover content to add</a>
 		</div>
 	{:else}
-		<div class="grid">
+		<div class="grid stagger-grid">
 			{#each items as item}
 				<a href="/library/{item.id}">
 					<PosterCard
@@ -99,63 +103,119 @@
 <style>
 	.page-header {
 		display: flex;
-		align-items: baseline;
-		gap: 0.75rem;
-		margin-bottom: 1rem;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 1.5rem;
 	}
 
-	h1 { font-size: 1.5rem; font-weight: 700; }
-	.count { color: var(--text-muted); font-size: 0.9rem; }
+	h1 {
+		font-size: 1.75rem;
+		font-weight: 800;
+		font-family: var(--font-display);
+		letter-spacing: -0.02em;
+	}
+
+	.count {
+		color: var(--text-muted);
+		font-size: 0.85rem;
+	}
 
 	.filters {
 		display: flex;
 		gap: 1rem;
-		margin-bottom: 1.25rem;
+		margin-bottom: 1.5rem;
 		flex-wrap: wrap;
 	}
 
+	/* Type selector - first filter group: glass bg, accent active with glow (matches Discover) */
 	.filter-group {
 		display: flex;
-		gap: 0.25rem;
-		background: var(--bg-surface);
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-		border-radius: 8px;
+		gap: 2px;
+		background: var(--glass-bg);
+		backdrop-filter: var(--glass-blur);
+		-webkit-backdrop-filter: var(--glass-blur);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-sm);
 		padding: 3px;
 	}
 
 	.filter-group button {
-		padding: 0.35rem 0.85rem;
+		padding: 0.4rem 1rem;
 		border: none;
 		background: transparent;
-		color: var(--text-secondary);
-		border-radius: 6px;
-		font-size: 0.8rem;
+		color: var(--text-muted);
+		border-radius: var(--radius-sm);
+		font-size: 0.82rem;
+		font-weight: 600;
+		font-family: var(--font-body);
 		cursor: pointer;
+		transition: all 0.2s;
 	}
 
-	.filter-group button.active {
-		background: var(--bg-active);
+	.filter-group button:hover {
 		color: var(--text-primary);
 	}
 
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-		gap: 1rem;
+	.filter-group button.active {
+		background: var(--accent);
+		color: var(--text-inverse);
+		box-shadow: 0 2px 8px var(--accent-glow);
 	}
 
-	.loading, .empty {
-		text-align: center;
+	/* Status filter pills - second filter group: same glass bg, accent active */
+
+	.grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+		gap: 1.25rem;
+	}
+
+	.loading {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.75rem;
 		color: var(--text-muted);
 		padding: 3rem;
+		font-size: 0.85rem;
+	}
+
+	.loading-spinner {
+		width: 18px;
+		height: 18px;
+		border: 2px solid var(--border);
+		border-top-color: var(--accent);
+		border-radius: 50%;
+		animation: spin 0.7s linear infinite;
+	}
+
+	.empty {
+		text-align: center;
+		color: var(--text-muted);
+		padding: 4rem 1rem;
+	}
+
+	.empty-icon {
+		font-size: 2.5rem;
+		opacity: 0.3;
+		margin-bottom: 0.75rem;
+	}
+
+	.empty p {
+		font-size: 0.9rem;
 	}
 
 	.btn-link {
 		display: inline-block;
-		margin-top: 0.5rem;
+		margin-top: 0.75rem;
 		color: var(--accent);
-		font-size: 0.9rem;
+		font-size: 0.85rem;
+		font-weight: 600;
+		transition: color 0.2s;
+	}
+
+	.btn-link:hover {
+		color: var(--accent-hover);
 	}
 
 	.pagination {
@@ -167,12 +227,23 @@
 	}
 
 	.pagination button {
-		padding: 0.4rem 1rem;
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-subtle);
+		padding: 0.45rem 1.1rem;
+		background: var(--glass-bg);
+		backdrop-filter: var(--glass-blur);
+		-webkit-backdrop-filter: var(--glass-blur);
+		border: 1px solid var(--glass-border);
 		color: var(--text-primary);
-		border-radius: 6px;
+		border-radius: var(--radius-sm);
+		font-size: 0.82rem;
+		font-weight: 600;
 		cursor: pointer;
+		transition: all 0.2s;
+	}
+
+	.pagination button:hover:not(:disabled) {
+		background: var(--accent);
+		color: var(--text-inverse);
+		box-shadow: 0 2px 8px var(--accent-glow);
 	}
 
 	.pagination button:disabled {
@@ -183,5 +254,19 @@
 	.pagination span {
 		color: var(--text-secondary);
 		font-size: 0.85rem;
+	}
+
+	@media (max-width: 768px) {
+		.page-header {
+			flex-direction: column;
+			gap: 0.75rem;
+			align-items: stretch;
+		}
+		.filters {
+			flex-direction: column;
+		}
+		.grid {
+			grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+		}
 	}
 </style>

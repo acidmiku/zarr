@@ -52,9 +52,11 @@
 	.track-list {
 		display: flex;
 		flex-direction: column;
+		gap: 0.1rem;
 	}
 
 	.disc-header {
+		font-family: var(--font-display);
 		font-size: 0.8rem;
 		font-weight: 700;
 		color: var(--text-secondary);
@@ -68,12 +70,20 @@
 		align-items: center;
 		gap: 0.75rem;
 		padding: 0.5rem 0.75rem;
-		border-radius: 6px;
+		border-radius: var(--radius-md);
+		font-family: var(--font-body);
 		font-size: 0.85rem;
+		background: transparent;
+		border: 1px solid transparent;
+		transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 	}
 
 	.track:hover {
-		background: var(--bg-hover);
+		background: var(--glass-bg);
+		border-color: var(--glass-border);
+		box-shadow: var(--shadow-sm);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.track.available {
@@ -83,8 +93,10 @@
 	.track-num {
 		width: 2rem;
 		text-align: right;
-		color: var(--text-muted);
+		color: var(--accent);
+		font-family: var(--font-display);
 		font-size: 0.8rem;
+		font-weight: 600;
 		flex-shrink: 0;
 	}
 
@@ -98,10 +110,12 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		display: block;
+		color: var(--text-primary);
 	}
 
 	.track-duration {
 		color: var(--text-muted);
+		font-family: var(--font-body);
 		font-size: 0.75rem;
 		flex-shrink: 0;
 		min-width: 3rem;

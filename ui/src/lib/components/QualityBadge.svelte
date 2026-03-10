@@ -25,13 +25,17 @@
 <style>
 	.quality-badge {
 		display: inline-block;
-		padding: 1px 6px;
-		border: 1px solid;
-		border-radius: 3px;
+		padding: 0.15rem 0.5rem;
+		border: 1px solid var(--glass-border);
+		border-radius: 9999px;
 		font-size: 0.7rem;
 		font-weight: 600;
-		font-family: monospace;
-		background: var(--bg-elevated);
+		font-family: var(--font-display);
+		letter-spacing: 0.02em;
+		background: var(--accent-subtle);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		box-shadow: var(--shadow-sm);
 		transition: all 0.2s ease;
 	}
 </style>

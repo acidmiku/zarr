@@ -34,19 +34,46 @@
 
 <style>
 	.badge {
-		display: inline-block;
-		padding: 2px 8px;
-		border-radius: 4px;
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		padding: 0.2rem 0.65rem;
+		border-radius: 9999px;
+		font-family: var(--font-display);
 		font-size: 0.7rem;
 		font-weight: 600;
 		text-transform: uppercase;
 		letter-spacing: 0.5px;
-		border: 1px solid;
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		border: 1px solid var(--glass-border);
+		color: var(--text-primary);
+		box-shadow: var(--shadow-sm);
 		transition: all 0.2s ease;
+		position: relative;
+		padding-left: 1.25rem;
+	}
+
+	.badge::before {
+		content: '';
+		position: absolute;
+		left: 0.5rem;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: currentColor;
+		box-shadow: 0 0 6px currentColor;
 	}
 
 	.small {
-		padding: 1px 5px;
+		padding: 0.1rem 0.5rem 0.1rem 1.1rem;
 		font-size: 0.6rem;
+	}
+
+	.small::before {
+		width: 5px;
+		height: 5px;
+		left: 0.4rem;
 	}
 </style>

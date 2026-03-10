@@ -217,18 +217,22 @@
 </div>
 
 <style>
+	/* ── Container ────────────────────────────────────────────── */
 	.detail {
 		position: relative;
-		background: var(--bg-surface);
-		border-radius: 12px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-xl);
 		overflow: hidden;
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		box-shadow: var(--shadow-lg);
 	}
 
+	/* ── Cinematic backdrop ───────────────────────────────────── */
 	.backdrop {
 		position: relative;
-		height: 160px;
+		height: 200px;
 		overflow: hidden;
 	}
 
@@ -236,39 +240,51 @@
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
-		opacity: 0.4;
+		opacity: 0.5;
+		filter: saturate(1.15) brightness(0.85);
+		transition: opacity 0.25s ease;
 	}
 
 	.backdrop-fade {
 		position: absolute;
-		bottom: 0;
-		left: 0;
-		right: 0;
-		height: 80px;
-		background: linear-gradient(transparent, var(--bg-surface));
+		inset: 0;
+		background: linear-gradient(
+			to bottom,
+			transparent 30%,
+			var(--glass-bg) 100%
+		);
 	}
 
+	/* ── Content area ─────────────────────────────────────────── */
 	.detail-content {
-		padding: 1.5rem;
+		padding: 1.75rem 2rem 2rem;
 		position: relative;
 	}
 
 	.detail-content.has-backdrop {
-		margin-top: -50px;
+		margin-top: -60px;
 	}
 
 	.detail-header {
 		display: flex;
-		gap: 1.5rem;
+		gap: 1.75rem;
 	}
 
+	/* ── Poster ────────────────────────────────────────────────── */
 	.detail-poster {
-		width: 150px;
-		border-radius: 8px;
-		box-shadow: var(--shadow-md);
+		width: 160px;
+		border-radius: var(--radius-lg);
+		box-shadow: var(--shadow-lg);
 		flex-shrink: 0;
 		object-fit: cover;
 		aspect-ratio: 2/3;
+		border: 1px solid var(--glass-border);
+		transition: box-shadow 0.25s ease, transform 0.25s ease;
+	}
+
+	.detail-poster:hover {
+		box-shadow: var(--shadow-glow);
+		transform: scale(1.02);
 	}
 
 	.detail-info {
@@ -276,65 +292,90 @@
 		min-width: 0;
 	}
 
+	/* ── Title ─────────────────────────────────────────────────── */
 	h2 {
-		font-size: 1.5rem;
-		font-weight: 700;
+		font-family: var(--font-display);
+		font-size: 1.65rem;
+		font-weight: 800;
+		letter-spacing: -0.02em;
 		margin-bottom: 0.5rem;
 		color: var(--text-primary);
+		line-height: 1.2;
 	}
 
+	/* ── Meta row (year / rating / seasons / status / type) ──── */
 	.meta-row {
 		display: flex;
 		align-items: center;
 		gap: 0.75rem;
-		margin-bottom: 0.75rem;
+		margin-bottom: 0.85rem;
 		flex-wrap: wrap;
 	}
 
 	.meta-item {
+		font-family: var(--font-body);
 		font-size: 0.85rem;
 		color: var(--text-secondary);
 	}
 
 	.rating-val {
-		color: var(--gold);
+		color: var(--accent);
+		font-weight: 700;
 	}
 
 	.media-type-tag {
 		background: var(--accent);
 		color: var(--text-inverse);
-		padding: 2px 8px;
-		border-radius: 4px;
-		font-size: 0.7rem;
+		padding: 3px 10px;
+		border-radius: var(--radius-sm);
+		font-family: var(--font-display);
+		font-size: 0.65rem;
 		font-weight: 700;
 		text-transform: uppercase;
-		letter-spacing: 0.03em;
+		letter-spacing: 0.06em;
+		box-shadow: 0 0 8px var(--accent-glow);
 	}
 
+	/* ── Genre tags ────────────────────────────────────────────── */
 	.genres {
 		display: flex;
 		gap: 0.4rem;
 		flex-wrap: wrap;
-		margin-bottom: 0.75rem;
+		margin-bottom: 0.85rem;
 	}
 
 	.genre-tag {
-		background: var(--bg-elevated);
-		padding: 2px 10px;
-		border-radius: 20px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		padding: 3px 12px;
+		border-radius: var(--radius-md);
+		font-family: var(--font-body);
 		font-size: 0.75rem;
 		color: var(--text-secondary);
+		transition: color 0.2s ease, border-color 0.2s ease;
 	}
 
+	.genre-tag:hover {
+		color: var(--text-primary);
+		border-color: var(--accent-subtle);
+	}
+
+	/* ── Overview ──────────────────────────────────────────────── */
 	.overview {
+		font-family: var(--font-body);
 		font-size: 0.875rem;
 		color: var(--text-secondary);
-		line-height: 1.5;
-		max-height: 4.5em;
+		line-height: 1.65;
+		max-height: 5.25em;
 		overflow: hidden;
-		margin-bottom: 1rem;
+		margin-bottom: 1.25rem;
+		-webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+		mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
 	}
 
+	/* ── Actions area ──────────────────────────────────────────── */
 	.actions {
 		display: flex;
 		gap: 0.75rem;
@@ -343,113 +384,170 @@
 
 	.add-row {
 		display: flex;
-		gap: 0.5rem;
+		gap: 0.6rem;
 		align-items: center;
 	}
 
+	/* ── Select / dropdown ─────────────────────────────────────── */
 	select {
-		background: var(--bg-input);
-		border: 1px solid var(--border-subtle);
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
 		color: var(--text-primary);
-		padding: 0.5rem 0.75rem;
-		border-radius: 6px;
+		padding: 0.5rem 0.85rem;
+		border-radius: var(--radius-md);
+		font-family: var(--font-body);
 		font-size: 0.85rem;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		transition: border-color 0.2s ease, box-shadow 0.2s ease;
+		cursor: pointer;
 	}
 
+	select:focus {
+		outline: none;
+		border-color: var(--accent);
+		box-shadow: 0 0 0 3px var(--accent-subtle);
+	}
+
+	/* ── Buttons ───────────────────────────────────────────────── */
 	.btn {
-		padding: 0.5rem 1.25rem;
-		border-radius: 6px;
+		padding: 0.55rem 1.35rem;
+		border-radius: var(--radius-md);
+		font-family: var(--font-display);
 		font-size: 0.85rem;
-		font-weight: 600;
+		font-weight: 700;
+		letter-spacing: -0.02em;
 		border: none;
-		transition: background 0.15s;
+		cursor: pointer;
+		transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
 		display: inline-flex;
 		align-items: center;
+		gap: 0.4rem;
+	}
+
+	.btn:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px var(--accent-subtle);
 	}
 
 	.btn-primary {
 		background: var(--accent);
 		color: var(--text-inverse);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.btn-primary:hover:not(:disabled) {
 		background: var(--accent-hover);
+		box-shadow: var(--shadow-glow);
+		transform: translateY(-1px);
+	}
+
+	.btn-primary:active:not(:disabled) {
+		transform: translateY(0);
 	}
 
 	.btn-primary:disabled {
-		opacity: 0.5;
+		opacity: 0.45;
+		cursor: not-allowed;
 	}
 
 	.btn-secondary {
-		background: var(--bg-elevated);
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
 		color: var(--text-primary);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.btn-secondary:hover {
-		background: var(--bg-hover);
+		border-color: var(--accent-subtle);
+		box-shadow: 0 0 0 3px var(--accent-subtle);
+		transform: translateY(-1px);
 	}
 
+	.btn-secondary:active {
+		transform: translateY(0);
+	}
+
+	/* ── Season picker ─────────────────────────────────────────── */
 	.season-picker {
 		width: 100%;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-lg);
+		padding: 1rem 1.15rem;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
 	}
 
 	.season-picker-header {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		margin-bottom: 0.5rem;
+		margin-bottom: 0.65rem;
 	}
 
 	.season-picker-title {
+		font-family: var(--font-display);
 		font-size: 0.85rem;
-		font-weight: 600;
+		font-weight: 700;
+		letter-spacing: -0.02em;
 		color: var(--text-primary);
 	}
 
 	.season-picker-actions {
 		display: flex;
-		gap: 0.5rem;
+		gap: 0.6rem;
 	}
 
 	.link-btn {
 		background: none;
 		border: none;
 		color: var(--accent);
+		font-family: var(--font-body);
 		font-size: 0.8rem;
+		font-weight: 600;
 		padding: 0;
 		cursor: pointer;
+		transition: color 0.2s ease;
 	}
 
 	.link-btn:hover {
+		color: var(--accent-hover);
 		text-decoration: underline;
 	}
 
 	.season-grid {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
-		margin-bottom: 0.75rem;
+		gap: 0.2rem;
+		margin-bottom: 0.85rem;
 		max-height: 200px;
 		overflow-y: auto;
+		scrollbar-width: thin;
 	}
 
 	.season-check {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
-		padding: 0.4rem 0.6rem;
-		border-radius: 6px;
+		padding: 0.45rem 0.65rem;
+		border-radius: var(--radius-sm);
+		font-family: var(--font-body);
 		font-size: 0.85rem;
 		color: var(--text-secondary);
 		cursor: pointer;
+		transition: background 0.2s ease, color 0.2s ease;
 	}
 
 	.season-check:hover {
-		background: var(--bg-elevated);
+		background: var(--accent-subtle);
+		color: var(--text-primary);
 	}
 
 	.season-check.checked {
 		color: var(--text-primary);
+		background: var(--accent-subtle);
 	}
 
 	.season-check input {
@@ -457,18 +555,38 @@
 	}
 
 	.ep-count {
-		font-size: 0.75rem;
+		font-size: 0.72rem;
 		color: var(--text-muted);
+		font-family: var(--font-body);
 	}
 
+	/* ── Responsive ────────────────────────────────────────────── */
 	@media (max-width: 600px) {
+		.detail-content {
+			padding: 1.25rem 1.25rem 1.5rem;
+		}
+
 		.detail-header {
 			flex-direction: column;
 			align-items: center;
 			text-align: center;
 		}
 
-		.detail-poster { width: 120px; }
-		.genres, .meta-row { justify-content: center; }
+		.detail-poster {
+			width: 130px;
+		}
+
+		.genres, .meta-row {
+			justify-content: center;
+		}
+
+		.add-row {
+			flex-wrap: wrap;
+			justify-content: center;
+		}
+
+		.season-picker {
+			padding: 0.85rem;
+		}
 	}
 </style>

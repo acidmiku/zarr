@@ -132,7 +132,7 @@
 	.episode-list {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.375rem;
 	}
 
 	.season-header {
@@ -141,38 +141,56 @@
 		align-items: center;
 		gap: 0.75rem;
 		padding: 0.75rem 1rem;
-		background: var(--bg-surface);
-		border: 1px solid var(--border);
-		border-radius: 8px;
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-md);
 		color: var(--text-primary);
+		font-family: var(--font-display);
 		font-size: 0.9rem;
+		font-weight: 700;
+		letter-spacing: -0.02em;
 		cursor: pointer;
 		text-align: left;
+		transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+		box-shadow: var(--shadow-sm);
 	}
 
 	.season-header:hover {
-		background: var(--bg-hover);
+		background: var(--accent-subtle);
+		border-color: var(--accent);
+		box-shadow: var(--shadow-md);
 	}
 
 	.expand-icon {
 		color: var(--text-muted);
 		width: 1rem;
+		transition: color 0.2s ease;
+	}
+
+	.season-header:hover .expand-icon {
+		color: var(--accent);
 	}
 
 	.season-title {
-		font-weight: 600;
+		font-weight: 700;
 		flex: 1;
 	}
 
 	.ep-count, .season-stats {
+		font-family: var(--font-body);
 		font-size: 0.8rem;
+		font-weight: 400;
 		color: var(--text-muted);
 	}
 
 	.episodes {
-		margin: 0.25rem 0 0.5rem 1rem;
-		border-left: 2px solid var(--border);
+		margin: 0.375rem 0 0.5rem 1rem;
+		border-left: 2px solid var(--glass-border);
 		padding-left: 0.75rem;
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
 	}
 
 	.episode {
@@ -180,12 +198,19 @@
 		align-items: center;
 		gap: 0.75rem;
 		padding: 0.5rem 0.75rem;
-		border-radius: 6px;
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		font-family: var(--font-body);
 		font-size: 0.85rem;
+		transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 	}
 
 	.episode:hover {
-		background: var(--bg-hover);
+		background: var(--accent-subtle);
+		border-color: var(--glass-border);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.episode.special {
@@ -195,6 +220,7 @@
 	.ep-num {
 		width: 3.5rem;
 		color: var(--text-muted);
+		font-family: var(--font-body);
 		font-size: 0.8rem;
 		flex-shrink: 0;
 		text-align: right;
@@ -203,6 +229,7 @@
 	.abs-num {
 		color: var(--accent);
 		margin-right: 4px;
+		font-weight: 600;
 	}
 
 	.ep-info {
@@ -217,11 +244,14 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		color: var(--text-primary);
+		font-family: var(--font-body);
 	}
 
 	.ep-date {
 		font-size: 0.75rem;
 		color: var(--text-muted);
+		font-family: var(--font-body);
 	}
 
 	.ep-status {
@@ -235,21 +265,26 @@
 	}
 
 	.action-btn {
-		background: var(--bg-elevated);
-		border: 1px solid var(--border-subtle);
+		background: var(--glass-bg);
+		backdrop-filter: blur(16px);
+		border: 1px solid var(--glass-border);
 		color: var(--text-secondary);
 		width: 28px;
 		height: 28px;
-		border-radius: 4px;
+		border-radius: var(--radius-sm);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		font-size: 0.85rem;
+		cursor: pointer;
+		transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 	}
 
 	.action-btn:hover {
-		background: var(--bg-hover);
-		color: var(--text-primary);
+		background: var(--accent);
+		color: var(--text-inverse);
+		border-color: var(--accent);
+		box-shadow: var(--shadow-sm);
 	}
 
 	.action-btn.danger:hover {

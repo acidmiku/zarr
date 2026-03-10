@@ -108,29 +108,42 @@
 		display: flex;
 		gap: 0.75rem;
 		padding: 0.65rem;
-		background: var(--bg-elevated);
-		border: 1px solid var(--border);
-		border-radius: 8px;
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-lg);
 		margin-top: 0.35rem;
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
-		transition: all 0.2s ease;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		box-shadow: var(--shadow-md);
+		transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+	}
+
+	.card:hover {
+		transform: translateY(-2px);
+		box-shadow: var(--shadow-lg), 0 0 20px var(--accent-glow);
+		border-color: var(--accent);
 	}
 
 	.poster {
 		width: 60px;
 		min-width: 60px;
 		height: 85px;
-		border-radius: 5px;
+		border-radius: var(--radius-md);
 		overflow: hidden;
-		background: var(--bg-surface);
+		background: var(--glass-bg);
 		flex-shrink: 0;
+		box-shadow: var(--shadow-sm);
 	}
 
 	.poster img {
 		width: 100%;
 		height: 100%;
 		object-fit: cover;
+		transition: transform 0.25s ease;
+	}
+
+	.card:hover .poster img {
+		transform: scale(1.05);
 	}
 
 	.body {
@@ -149,28 +162,34 @@
 	}
 
 	.title {
+		font-family: var(--font-display);
 		font-weight: 600;
 		font-size: 0.82rem;
 		color: var(--text-primary);
 	}
 
 	.badge {
-		padding: 1px 5px;
-		border-radius: 3px;
+		padding: 0.1rem 0.45rem;
+		border-radius: var(--radius-sm);
+		font-family: var(--font-display);
 		font-size: 0.6rem;
 		font-weight: 700;
-		color: white;
+		color: var(--text-inverse);
 		text-transform: uppercase;
 		flex-shrink: 0;
+		letter-spacing: 0.03em;
 	}
 
 	.score {
+		font-family: var(--font-display);
 		font-size: 0.7rem;
 		color: var(--gold);
 		font-weight: 600;
+		text-shadow: 0 0 6px var(--gold);
 	}
 
 	.reason {
+		font-family: var(--font-body);
 		font-size: 0.78rem;
 		color: var(--text-secondary);
 		line-height: 1.35;
@@ -181,16 +200,26 @@
 		align-self: flex-start;
 		margin-top: 0.2rem;
 		padding: 0.2rem 0.55rem;
-		background: transparent;
-		border: 1px solid var(--border-subtle);
-		border-radius: 4px;
+		background: var(--accent-subtle);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-sm);
 		color: var(--accent);
+		font-family: var(--font-display);
 		font-size: 0.7rem;
 		font-weight: 600;
 		cursor: pointer;
 		transition: all 0.2s ease;
 	}
 
-	.add-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
-	.add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+	.add-btn:hover {
+		background: var(--accent);
+		color: var(--text-inverse);
+		border-color: var(--accent-hover);
+		box-shadow: 0 0 12px var(--accent-glow);
+	}
+
+	.add-btn:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
 </style>
