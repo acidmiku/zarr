@@ -102,6 +102,10 @@ export const api = {
 		request('POST', '/music/releases/grab', data),
 	musicCoverUrl: (rgid: string) => `${BASE}/music/cover?rgid=${rgid}`,
 
+	// Import
+	importScan: (path: string, type: string) => request('POST', '/import/scan', { path, type }),
+	importExecute: (items: any[]) => request('POST', '/import/execute', { items }),
+
 	// Settings
 	getSettings: () => request('GET', '/settings'),
 	updateSettings: (data: any) => request('PUT', '/settings', data),

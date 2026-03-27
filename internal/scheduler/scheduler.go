@@ -228,20 +228,33 @@ func (s *Scheduler) pollDownloads() {
 			slog.Warn("download failed", "nzo_id", slot.NzoID, "message", slot.FailMessage)
 			s.db.Exec(`UPDATE downloads SET status = 'failed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, dlID)
 
-			var mediaItemID sql.NullInt64
-			var albumID sql.NullInt64
-			s.db.QueryRow(`SELECT media_item_id, album_id FROM downloads WHERE id = ?`, dlID).Scan(&mediaItemID, &albumID)
+			var mediaItemID, episodeID, albumID sql.NullInt64
+			var nzbTitle string
+			s.db.QueryRow(`SELECT media_item_id, episode_id, album_id, nzb_title FROM downloads WHERE id = ?`, dlID).
+				Scan(&mediaItemID, &episodeID, &albumID, &nzbTitle)
+
+			// Blacklist the failed release
+			s.blacklistRelease(mediaItemID, episodeID, albumID, nzbTitle, slot.FailMessage)
 
 			if albumID.Valid && albumID.Int64 > 0 {
-				// Music download failed — reset album to wanted so scheduler retries
 				s.db.Exec(`UPDATE albums SET status = 'wanted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'downloading'`,
 					albumID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'failed', ?)`,
 					albumID.Int64, slot.FailMessage)
-				slog.Warn("music download failed, album reset to wanted", "album_id", albumID.Int64)
+				slog.Warn("music download failed, will retry with next release", "album_id", albumID.Int64)
+			} else if episodeID.Valid {
+				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, episodeID.Int64)
+				s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'failed', ?)`,
+					mediaItemID.Int64, episodeID.Int64, "Failed: "+slot.FailMessage+", retrying with next release")
+				slog.Warn("episode download failed, will retry with next release", "episode_id", episodeID.Int64)
+				// Auto-retry with next best release
+				go s.retryEpisodeWithNextRelease(int(mediaItemID.Int64), int(episodeID.Int64))
 			} else if mediaItemID.Valid {
+				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
-					mediaItemID.Int64, slot.FailMessage)
+					mediaItemID.Int64, "Failed: "+slot.FailMessage+", retrying with next release")
+				slog.Warn("movie download failed, will retry with next release", "media_item_id", mediaItemID.Int64)
+				go s.retryMovieWithNextRelease(int(mediaItemID.Int64))
 			}
 		}
 	}
@@ -407,6 +420,9 @@ func (s *Scheduler) searchAndGrabAlbum(albumID int, artist, title string, year, 
 		}
 	}
 
+	// Filter blacklisted releases and score
+	albumBlacklist := s.loadAlbumBlacklist(albumID)
+	releases = indexer.FilterBlacklisted(releases, albumBlacklist)
 	for i := range releases {
 		indexer.ScoreRelease(&releases[i], profile)
 	}
@@ -561,7 +577,9 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 		}
 	}
 
-	// Score releases
+	// Filter blacklisted releases and score
+	blacklist := s.loadBlacklist(mediaItemID, episodeID)
+	releases = indexer.FilterBlacklisted(releases, blacklist)
 	for i := range releases {
 		indexer.ScoreRelease(&releases[i], profile)
 	}
@@ -661,9 +679,45 @@ func (s *Scheduler) pollTorrentDownloads() {
 			status = "downloading"
 		}
 
+		// Check if this is a newly failed torrent
+		var currentStatus string
+		s.db.QueryRow(`SELECT status FROM downloads WHERE id = ?`, dlID).Scan(&currentStatus)
+
 		// Update download record
 		s.db.Exec(`UPDATE downloads SET status = ?, qbt_hash = ? WHERE id = ? AND status NOT IN ('imported', 'failed')`,
 			status, t.Hash, dlID)
+
+		if status == "failed" && currentStatus != "failed" {
+			// Torrent just failed — blacklist and retry
+			var mediaItemID, episodeID, albumID sql.NullInt64
+			var nzbTitle string
+			s.db.QueryRow(`SELECT media_item_id, episode_id, album_id, nzb_title FROM downloads WHERE id = ?`, dlID).
+				Scan(&mediaItemID, &episodeID, &albumID, &nzbTitle)
+
+			s.blacklistRelease(mediaItemID, episodeID, albumID, nzbTitle, "torrent error: "+t.State)
+
+			if albumID.Valid && albumID.Int64 > 0 {
+				s.db.Exec(`UPDATE albums SET status = 'wanted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'downloading'`,
+					albumID.Int64)
+				s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'failed', ?)`,
+					albumID.Int64, "Torrent failed: "+t.State)
+			} else if episodeID.Valid {
+				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, episodeID.Int64)
+				s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'failed', ?)`,
+					mediaItemID.Int64, episodeID.Int64, "Torrent failed, retrying with next release")
+				go s.retryEpisodeWithNextRelease(int(mediaItemID.Int64), int(episodeID.Int64))
+			} else if mediaItemID.Valid {
+				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
+				s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
+					mediaItemID.Int64, "Torrent failed, retrying with next release")
+				go s.retryMovieWithNextRelease(int(mediaItemID.Int64))
+			}
+
+			// Delete the failed torrent from qBittorrent
+			s.qbt.DeleteTorrent(t.Hash, true)
+			s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ?`, dlID)
+			continue
+		}
 
 		// If torrent completed downloading (progress == 1.0) and not yet post-processed
 		if t.Progress >= 1.0 {
@@ -783,6 +837,259 @@ func filterIndexersByType(indexers []indexer.IndexerConfig, idxType, contentType
 		filtered = append(filtered, idx)
 	}
 	return filtered
+}
+
+// blacklistRelease adds a release title to the blacklist so it won't be grabbed again.
+func (s *Scheduler) blacklistRelease(mediaItemID, episodeID, albumID sql.NullInt64, title, reason string) {
+	if title == "" || title == "manual-grab" {
+		return
+	}
+	s.db.Exec(`INSERT INTO release_blacklist (media_item_id, episode_id, album_id, release_title, reason) VALUES (?, ?, ?, ?, ?)`,
+		nullInt(mediaItemID), nullInt(episodeID), nullInt(albumID), title, reason)
+	slog.Info("blacklisted release", "title", title, "reason", reason)
+}
+
+func nullInt(n sql.NullInt64) interface{} {
+	if n.Valid {
+		return n.Int64
+	}
+	return nil
+}
+
+// loadBlacklist returns blacklisted release titles for a given media item or episode.
+func (s *Scheduler) loadBlacklist(mediaItemID int, episodeID int) []string {
+	var titles []string
+	var rows *sql.Rows
+	var err error
+	if episodeID > 0 {
+		rows, err = s.db.Query(`SELECT release_title FROM release_blacklist WHERE episode_id = ?`, episodeID)
+	} else {
+		rows, err = s.db.Query(`SELECT release_title FROM release_blacklist WHERE media_item_id = ? AND episode_id IS NULL`, mediaItemID)
+	}
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t string
+		rows.Scan(&t)
+		titles = append(titles, t)
+	}
+	return titles
+}
+
+// loadAlbumBlacklist returns blacklisted release titles for an album.
+func (s *Scheduler) loadAlbumBlacklist(albumID int) []string {
+	rows, err := s.db.Query(`SELECT release_title FROM release_blacklist WHERE album_id = ?`, albumID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var titles []string
+	for rows.Next() {
+		var t string
+		rows.Scan(&t)
+		titles = append(titles, t)
+	}
+	return titles
+}
+
+// retryEpisodeWithNextRelease searches for the next best non-blacklisted release for an episode.
+func (s *Scheduler) retryEpisodeWithNextRelease(mediaItemID, episodeID int) {
+	var title string
+	var tvdbID, profileID int
+	var anime bool
+	var seasonNum, epNum int
+	var absNum sql.NullInt64
+	s.db.QueryRow(`SELECT title, COALESCE(tvdb_id,0), anime, COALESCE(quality_profile_id,0)
+		FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &tvdbID, &anime, &profileID)
+	s.db.QueryRow(`SELECT s.number, e.number, e.absolute_number
+		FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE e.id = ?`,
+		episodeID).Scan(&seasonNum, &epNum, &absNum)
+
+	allIndexers := s.loadIndexers()
+	if len(allIndexers) == 0 {
+		return
+	}
+	profile := s.loadProfile(profileID)
+	if profile == nil {
+		return
+	}
+
+	contentType := "series"
+	if anime {
+		contentType = "anime"
+	}
+
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", contentType)
+	var releases []indexer.Release
+	if anime && absNum.Valid {
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, []string{title}, int(absNum.Int64))
+	} else {
+		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, seasonNum, epNum, title)
+	}
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
+	if len(rtIndexers) > 0 && s.rtClient != nil {
+		query := fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)
+		if anime && absNum.Valid {
+			query = fmt.Sprintf("%s %d", title, absNum.Int64)
+		}
+		forumIDs := rutracker.DefaultForumIDs[contentType]
+		for _, idx := range rtIndexers {
+			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
+			if err != nil {
+				continue
+			}
+			for _, r := range results {
+				parsed := indexer.ParseReleaseName(r.Title)
+				releases = append(releases, indexer.Release{
+					Title: r.Title, Size: r.Size, Quality: parsed.Quality, Tags: parsed.Tags,
+					Indexer: idx.Name, DownloadType: "torrent", Seeders: r.Seeders, Leechers: r.Leechers, TopicID: r.TopicID,
+				})
+			}
+		}
+	}
+
+	// Filter blacklisted and score
+	blacklist := s.loadBlacklist(mediaItemID, episodeID)
+	releases = indexer.FilterBlacklisted(releases, blacklist)
+	for i := range releases {
+		indexer.ScoreRelease(&releases[i], profile)
+	}
+
+	best := indexer.BestRelease(releases)
+	if best == nil {
+		slog.Info("no alternative releases found after blacklisting", "episode_id", episodeID)
+		return
+	}
+
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
+		if len(rtIdxs) > 0 && s.rtClient != nil && s.qbt != nil {
+			idx := rtIdxs[0]
+			torrentData, err := s.rtClient.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
+				mediaItemID, episodeID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
+				mediaItemID, episodeID, fmt.Sprintf("Auto-retry: grabbed torrent %s", best.Title))
+			slog.Info("auto-retry grabbed torrent", "title", best.Title, "episode_id", episodeID)
+			return
+		}
+	}
+
+	nzoID, err := s.grabberSvc.GrabNZB(best.NZBURL, best.Title)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
+		mediaItemID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
+	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
+	s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
+		VALUES (?, ?, 'grabbed', ?)`, mediaItemID, episodeID, fmt.Sprintf("Auto-retry: grabbed %s", best.Title))
+	slog.Info("auto-retry grabbed release", "title", best.Title, "episode_id", episodeID)
+}
+
+// retryMovieWithNextRelease searches for the next best non-blacklisted release for a movie.
+func (s *Scheduler) retryMovieWithNextRelease(mediaItemID int) {
+	var title, imdbID string
+	var year, profileID int
+	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
+		FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID)
+
+	allIndexers := s.loadIndexers()
+	if len(allIndexers) == 0 {
+		return
+	}
+	profile := s.loadProfile(profileID)
+	if profile == nil {
+		return
+	}
+
+	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+	releases := s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
+	for i := range releases {
+		releases[i].DownloadType = "nzb"
+	}
+
+	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+	if len(rtIndexers) > 0 && s.rtClient != nil {
+		query := title
+		if year > 0 {
+			query = fmt.Sprintf("%s %d", title, year)
+		}
+		forumIDs := rutracker.DefaultForumIDs["movie"]
+		for _, idx := range rtIndexers {
+			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
+			if err != nil {
+				continue
+			}
+			for _, r := range results {
+				parsed := indexer.ParseReleaseName(r.Title)
+				releases = append(releases, indexer.Release{
+					Title: r.Title, Size: r.Size, Quality: parsed.Quality, Tags: parsed.Tags,
+					Indexer: idx.Name, DownloadType: "torrent", Seeders: r.Seeders, Leechers: r.Leechers, TopicID: r.TopicID,
+				})
+			}
+		}
+	}
+
+	blacklist := s.loadBlacklist(mediaItemID, 0)
+	releases = indexer.FilterBlacklisted(releases, blacklist)
+	for i := range releases {
+		indexer.ScoreRelease(&releases[i], profile)
+	}
+
+	best := indexer.BestRelease(releases)
+	if best == nil {
+		slog.Info("no alternative releases found after blacklisting", "media_item_id", mediaItemID)
+		return
+	}
+
+	qualityJSON, _ := json.Marshal(best.Quality)
+
+	if best.DownloadType == "torrent" && best.TopicID > 0 {
+		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
+		if len(rtIdxs) > 0 && s.rtClient != nil && s.qbt != nil {
+			idx := rtIdxs[0]
+			torrentData, err := s.rtClient.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
+			if err != nil {
+				return
+			}
+			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, 'torrent')`,
+				mediaItemID, best.Title, string(qualityJSON), best.Score)
+			dlID, _ := result.LastInsertId()
+			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
+			s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaItemID)
+			s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'grabbed', ?)`,
+				mediaItemID, fmt.Sprintf("Auto-retry: grabbed torrent %s", best.Title))
+			slog.Info("auto-retry grabbed movie torrent", "title", best.Title)
+			return
+		}
+	}
+
+	nzoID, err := s.grabberSvc.GrabNZB(best.NZBURL, best.Title)
+	if err != nil {
+		return
+	}
+	s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
+		VALUES (?, ?, ?, ?, ?, 'nzb')`, mediaItemID, best.Title, nzoID, string(qualityJSON), best.Score)
+	s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaItemID)
+	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details)
+		VALUES (?, 'grabbed', ?)`, mediaItemID, fmt.Sprintf("Auto-retry: grabbed %s", best.Title))
+	slog.Info("auto-retry grabbed movie release", "title", best.Title)
 }
 
 // resolveSABnzbdPath translates SABnzbd's internal path to a path accessible by Zarr.

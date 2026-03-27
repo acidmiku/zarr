@@ -1,5 +1,5 @@
 # Binaries
-mediaforge
+/mediaforge
 *.exe
 *.dll
 *.so

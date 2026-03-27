@@ -27,7 +27,7 @@ func DefaultTemplates() NamingTemplates {
 
 // MoviePath generates the destination path for a movie file.
 func MoviePath(mediaRoot, title string, year int, ext string) string {
-	clean := sanitizeFilename(title)
+	clean := SanitizeFilename(title)
 	dir := fmt.Sprintf("%s (%d)", clean, year)
 	file := fmt.Sprintf("%s (%d)%s", clean, year, ext)
 	return filepath.Join(mediaRoot, "movies", dir, file)
@@ -35,8 +35,8 @@ func MoviePath(mediaRoot, title string, year int, ext string) string {
 
 // SeriesEpisodePath generates the destination path for a TV series episode.
 func SeriesEpisodePath(mediaRoot, title string, year, season, episode int, episodeTitle, ext string) string {
-	clean := sanitizeFilename(title)
-	epClean := sanitizeFilename(episodeTitle)
+	clean := SanitizeFilename(title)
+	epClean := SanitizeFilename(episodeTitle)
 	seriesDir := fmt.Sprintf("%s (%d)", clean, year)
 	seasonDir := fmt.Sprintf("Season %02d", season)
 	file := fmt.Sprintf("%s - S%02dE%02d - %s%s", clean, season, episode, epClean, ext)
@@ -45,8 +45,8 @@ func SeriesEpisodePath(mediaRoot, title string, year, season, episode int, episo
 
 // AnimeEpisodePath generates the destination path for an anime episode.
 func AnimeEpisodePath(mediaRoot, title string, season, episode, absolute int, episodeTitle, ext string) string {
-	clean := sanitizeFilename(title)
-	epClean := sanitizeFilename(episodeTitle)
+	clean := SanitizeFilename(title)
+	epClean := SanitizeFilename(episodeTitle)
 	seasonDir := fmt.Sprintf("Season %02d", season)
 	file := fmt.Sprintf("%s - S%02dE%02d - %03d - %s%s", clean, season, episode, absolute, epClean, ext)
 	return filepath.Join(mediaRoot, "anime", clean, seasonDir, file)
@@ -54,8 +54,8 @@ func AnimeEpisodePath(mediaRoot, title string, season, episode, absolute int, ep
 
 // AnimeSpecialPath generates the destination path for an anime special/OVA.
 func AnimeSpecialPath(mediaRoot, title string, specialNum int, episodeTitle, ext string) string {
-	clean := sanitizeFilename(title)
-	epClean := sanitizeFilename(episodeTitle)
+	clean := SanitizeFilename(title)
+	epClean := SanitizeFilename(episodeTitle)
 	file := fmt.Sprintf("%s - S00E%02d - %s%s", clean, specialNum, epClean, ext)
 	return filepath.Join(mediaRoot, "anime", clean, "Specials", file)
 }
@@ -79,9 +79,9 @@ func IsAudioFile(name string) bool {
 // MusicTrackPath generates the destination path for a music track.
 // Format: music/{artist}/{album} ({year})/{track:02d} - {title}.{ext}
 func MusicTrackPath(mediaRoot, artist, album string, year, trackNum, discNum int, title, ext string) string {
-	cleanArtist := sanitizeFilename(artist)
-	cleanAlbum := sanitizeFilename(album)
-	cleanTitle := sanitizeFilename(title)
+	cleanArtist := SanitizeFilename(artist)
+	cleanAlbum := SanitizeFilename(album)
+	cleanTitle := SanitizeFilename(title)
 
 	var albumDir string
 	if year > 0 {
@@ -115,10 +115,10 @@ func IsVideoFile(name string) bool {
 	return videoExtensions[ext]
 }
 
-// sanitizeFilename removes characters that are invalid in file paths.
+// SanitizeFilename removes characters that are invalid in file paths.
 var invalidChars = regexp.MustCompile(`[<>:"/\\|?*]`)
 
-func sanitizeFilename(name string) string {
+func SanitizeFilename(name string) string {
 	clean := invalidChars.ReplaceAllString(name, "")
 	clean = strings.TrimSpace(clean)
 	// Collapse multiple spaces

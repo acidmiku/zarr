@@ -16,6 +16,8 @@
 	let showReleases = false;
 	let releases = [];
 	let searchingReleases = false;
+	let releasesContext = ''; // '' for movie/series-wide, or 'Episode X' label
+	let releasesEpisodeId = 0;
 	let error = '';
 
 	// Add Seasons state
@@ -94,12 +96,15 @@
 		}
 	}
 
-	async function viewReleases() {
+	async function viewReleases(episodeId = 0, label = '') {
 		showReleases = true;
 		searchingReleases = true;
+		releasesContext = label;
+		releasesEpisodeId = episodeId;
+		releases = [];
 		error = '';
 		try {
-			releases = await api.searchReleases(id);
+			releases = await api.searchReleases(id, episodeId || undefined);
 		} catch (e) {
 			error = e.message;
 		}
@@ -111,8 +116,12 @@
 		try {
 			const data = {
 				release_url: rel.nzb_url,
+				title: rel.title,
 				media_item_id: id
 			};
+			if (releasesEpisodeId) {
+				data.episode_id = releasesEpisodeId;
+			}
 			if (rel.download_type === 'torrent') {
 				data.download_type = 'torrent';
 				data.topic_id = rel.topic_id;
@@ -290,9 +299,7 @@
 						{#if hasWantedEpisodes}
 							<button class="btn btn-primary" on:click={searchAll}>Search All Wanted</button>
 						{/if}
-						{#if item.type === 'movie'}
-							<button class="btn btn-secondary" on:click={viewReleases}>View Releases</button>
-						{/if}
+						<button class="btn btn-secondary" on:click={() => viewReleases()}>View Releases</button>
 						{#if item.type === 'series' && item.tmdb_id}
 							<button class="btn btn-secondary" on:click={openSeasonPicker} disabled={loadingSeasons}>
 								{loadingSeasons ? 'Loading...' : 'Add Seasons'}
@@ -323,7 +330,7 @@
 			{#if item.type === 'series' && seasons.length > 0}
 				<div class="episodes-section">
 					<h2>Episodes</h2>
-					<EpisodeList mediaId={id} {seasons} />
+					<EpisodeList mediaId={id} {seasons} onViewReleases={viewReleases} />
 				</div>
 			{/if}
 		</div>
@@ -333,7 +340,7 @@
 		<!-- svelte-ignore a11y-click-events-have-key-events -->
 		<div class="modal-overlay" on:click={() => showReleases = false} role="presentation">
 			<div class="modal releases-modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-				<h2>Available Releases</h2>
+				<h2>Available Releases{releasesContext ? ` — ${releasesContext}` : ''}</h2>
 				{#if searchingReleases}
 					<div class="loading">Searching indexers...</div>
 				{:else if releases.length === 0}

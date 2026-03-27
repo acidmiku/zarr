@@ -67,6 +67,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/music/releases/grab", s.handleGrabMusicRelease)
 	s.mux.HandleFunc("GET /api/music/cover", s.handleMusicCover)
 
+	// Import
+	s.mux.HandleFunc("POST /api/import/scan", s.handleImportScan)
+	s.mux.HandleFunc("POST /api/import/execute", s.handleImportExecute)
+
 	// Settings
 	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)

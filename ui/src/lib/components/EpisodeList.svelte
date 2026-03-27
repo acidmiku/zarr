@@ -5,6 +5,7 @@
 
 	export let mediaId;
 	export let seasons = [];
+	export let onViewReleases = null;
 
 	let expandedSeasons = new Set();
 
@@ -109,8 +110,11 @@
 								<StatusBadge status={ep.status} small />
 							</div>
 							<div class="ep-actions">
+								{#if onViewReleases}
+									<button class="action-btn" title="Browse releases" on:click={() => onViewReleases(ep.id, `S${String(season.number).padStart(2,'0')}E${String(ep.number).padStart(2,'0')}`)}>☰</button>
+								{/if}
 								{#if ep.status === 'wanted' || ep.status === 'searching'}
-									<button class="action-btn" title="Search" on:click={() => searchEpisode(ep.id)}>⌕</button>
+									<button class="action-btn" title="Auto search" on:click={() => searchEpisode(ep.id)}>⌕</button>
 								{/if}
 								{#if ep.status === 'downloading'}
 									<button class="action-btn" title="Search again" on:click={() => searchEpisode(ep.id)}>⌕</button>

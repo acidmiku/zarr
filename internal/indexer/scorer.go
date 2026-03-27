@@ -120,6 +120,44 @@ func BestRelease(releases []Release) *Release {
 	return best
 }
 
+// FilterBlacklisted removes releases whose titles appear in the blacklist.
+func FilterBlacklisted(releases []Release, blacklist []string) []Release {
+	if len(blacklist) == 0 {
+		return releases
+	}
+	bl := make(map[string]bool, len(blacklist))
+	for _, t := range blacklist {
+		bl[t] = true
+	}
+	var filtered []Release
+	for _, r := range releases {
+		if bl[r.Title] {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
+}
+
+// MarkBlacklisted marks blacklisted releases as rejected but keeps them in the slice (for UI display).
+func MarkBlacklisted(releases []Release, blacklist []string) []Release {
+	if len(blacklist) == 0 {
+		return releases
+	}
+	bl := make(map[string]bool, len(blacklist))
+	for _, t := range blacklist {
+		bl[t] = true
+	}
+	for i := range releases {
+		if bl[releases[i].Title] {
+			releases[i].Acceptable = false
+			releases[i].RejectReason = "blacklisted"
+			releases[i].Score = 0
+		}
+	}
+	return releases
+}
+
 // ShouldUpgrade checks if a new release should replace an existing one.
 func ShouldUpgrade(newScore, existingScore int, upgradeAllowed bool) bool {
 	return upgradeAllowed && newScore > existingScore

@@ -3,6 +3,7 @@ package postprocess
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,12 +13,13 @@ import (
 
 // Processor handles post-processing of completed downloads.
 type Processor struct {
-	db        *database.DB
-	mediaRoot string
+	db            *database.DB
+	mediaRoot     string
+	coverCacheDir string
 }
 
-func New(db *database.DB, mediaRoot string) *Processor {
-	return &Processor{db: db, mediaRoot: mediaRoot}
+func New(db *database.DB, mediaRoot, coverCacheDir string) *Processor {
+	return &Processor{db: db, mediaRoot: mediaRoot, coverCacheDir: coverCacheDir}
 }
 
 // UpdateMediaRoot updates the media root directory.
@@ -82,7 +84,7 @@ func (p *Processor) Process(downloadID int, downloadPath string) error {
 
 func (p *Processor) processMovie(downloadID, mediaItemID int, title string, year int, files []string) error {
 	// Use the largest video file (most likely the movie)
-	srcFile := largestFile(files)
+	srcFile := LargestFile(files)
 	ext := filepath.Ext(srcFile)
 	destPath := MoviePath(p.mediaRoot, title, year, ext)
 
@@ -123,7 +125,7 @@ func (p *Processor) processEpisode(downloadID, mediaItemID int, episodeID sql.Nu
 }
 
 func (p *Processor) importSingleEpisode(downloadID, mediaItemID, episodeID int, seriesTitle string, year int, anime bool, files []string) error {
-	srcFile := largestFile(files)
+	srcFile := LargestFile(files)
 	ext := filepath.Ext(srcFile)
 
 	// Get episode details
@@ -288,7 +290,7 @@ func (p *Processor) processAlbum(downloadID, albumID int, downloadPath string) e
 		status = "available" // partial is still marked available
 	}
 	p.db.Exec(`UPDATE albums SET status = ?, root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		status, filepath.Join(p.mediaRoot, "music", sanitizeFilename(artistName), sanitizeFilename(albumTitle)), albumID)
+		status, filepath.Join(p.mediaRoot, "music", SanitizeFilename(artistName), SanitizeFilename(albumTitle)), albumID)
 
 	// Update download
 	p.db.Exec(`UPDATE downloads SET status = 'imported', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, downloadID)
@@ -296,6 +298,10 @@ func (p *Processor) processAlbum(downloadID, albumID int, downloadPath string) e
 	// Log activity
 	p.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'imported', ?)`,
 		albumID, fmt.Sprintf("Imported %d/%d tracks for %s - %s", available, total, artistName, albumTitle))
+
+	// Save cover art to album directory
+	albumDir := filepath.Join(p.mediaRoot, "music", SanitizeFilename(artistName), SanitizeFilename(albumTitle))
+	p.SaveCoverToAlbumDir(albumID, albumDir, downloadPath)
 
 	slog.Info("album imported", "artist", artistName, "album", albumTitle, "tracks", fmt.Sprintf("%d/%d", available, total))
 	return nil
@@ -351,8 +357,8 @@ func findVideoFiles(dir string) ([]string, error) {
 	return files, err
 }
 
-// largestFile returns the path of the largest file.
-func largestFile(files []string) string {
+// LargestFile returns the path of the largest file.
+func LargestFile(files []string) string {
 	var largest string
 	var maxSize int64
 	for _, f := range files {
@@ -387,13 +393,24 @@ func moveFile(src, dst string) error {
 	return os.Remove(src)
 }
 
-// copyFile copies a file from src to dst.
+// copyFile streams a file from src to dst without loading it all into memory.
 func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0644)
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 // hardlinkFile creates a hard link from src to dst. Falls back to copy
@@ -467,7 +484,7 @@ func (p *Processor) ProcessTorrent(downloadID int, contentPath string) error {
 }
 
 func (p *Processor) processMovieTorrent(downloadID, mediaItemID int, title string, year int, files []string) error {
-	srcFile := largestFile(files)
+	srcFile := LargestFile(files)
 	ext := filepath.Ext(srcFile)
 	destPath := MoviePath(p.mediaRoot, title, year, ext)
 
@@ -491,7 +508,7 @@ func (p *Processor) processEpisodeTorrent(downloadID, mediaItemID int, episodeID
 		return nil
 	}
 
-	srcFile := largestFile(files)
+	srcFile := LargestFile(files)
 	ext := filepath.Ext(srcFile)
 
 	var (
@@ -616,13 +633,92 @@ func (p *Processor) processAlbumTorrent(downloadID, albumID int, contentPath str
 		status = "available"
 	}
 	p.db.Exec(`UPDATE albums SET status = ?, root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		status, filepath.Join(p.mediaRoot, "music", sanitizeFilename(artistName), sanitizeFilename(albumTitle)), albumID)
+		status, filepath.Join(p.mediaRoot, "music", SanitizeFilename(artistName), SanitizeFilename(albumTitle)), albumID)
 
 	p.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'imported', ?)`,
 		albumID, fmt.Sprintf("Imported (torrent) %d/%d tracks for %s - %s", available, total, artistName, albumTitle))
 
+	// Save cover art to album directory
+	albumDir := filepath.Join(p.mediaRoot, "music", SanitizeFilename(artistName), SanitizeFilename(albumTitle))
+	p.SaveCoverToAlbumDir(albumID, albumDir, contentPath)
+
 	slog.Info("album imported from torrent", "artist", artistName, "album", albumTitle, "tracks", fmt.Sprintf("%d/%d", available, total))
 	return nil
+}
+
+// SaveCoverToAlbumDir saves cover art as cover.jpg in the album directory.
+// It first checks the download directory for existing cover images, then
+// falls back to the cached cover art from CoverArtArchive.
+func (p *Processor) SaveCoverToAlbumDir(albumID int, albumDir, downloadDir string) {
+	coverDest := filepath.Join(albumDir, "cover.jpg")
+
+	// Already exists
+	if _, err := os.Stat(coverDest); err == nil {
+		return
+	}
+
+	os.MkdirAll(albumDir, 0755)
+
+	// 1. Look for cover images in the download directory
+	if src := findCoverInDir(downloadDir); src != "" {
+		if err := copyFile(src, coverDest); err == nil {
+			slog.Info("saved album cover from download", "dest", coverDest)
+			return
+		}
+	}
+
+	// 2. Fall back to cached cover art
+	if p.coverCacheDir != "" {
+		var rgid string
+		p.db.QueryRow(`SELECT release_group_id FROM albums WHERE id = ?`, albumID).Scan(&rgid)
+		if rgid != "" {
+			cached := filepath.Join(p.coverCacheDir, "mb_"+rgid+".jpg")
+			if _, err := os.Stat(cached); err == nil {
+				if err := copyFile(cached, coverDest); err == nil {
+					slog.Info("saved album cover from cache", "dest", coverDest)
+					return
+				}
+			}
+		}
+	}
+
+	slog.Debug("no cover art found for album", "albumID", albumID)
+}
+
+// findCoverInDir looks for common cover art filenames in a directory.
+func findCoverInDir(dir string) string {
+	coverNames := []string{
+		"cover.jpg", "cover.jpeg", "cover.png",
+		"folder.jpg", "folder.jpeg", "folder.png",
+		"front.jpg", "front.jpeg", "front.png",
+		"album.jpg", "album.jpeg", "album.png",
+		"Cover.jpg", "Folder.jpg", "Front.jpg",
+	}
+
+	for _, name := range coverNames {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	// Also check subdirectories one level deep
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		for _, name := range coverNames[:6] { // just lowercase variants
+			path := filepath.Join(dir, entry.Name(), name)
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+	}
+	return ""
 }
 
 // CleanDownloadDir removes the download directory after import.

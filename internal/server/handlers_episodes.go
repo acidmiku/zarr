@@ -222,6 +222,10 @@ func (s *Server) searchForEpisode(w http.ResponseWriter, mediaID, episodeID int)
 		return
 	}
 
+	// Filter blacklisted releases
+	blacklist := s.loadBlacklist(mediaID, episodeID)
+	releases = indexer.FilterBlacklisted(releases, blacklist)
+
 	best := indexer.BestRelease(releases)
 	if best == nil {
 		writeJSON(w, 200, map[string]interface{}{
@@ -285,6 +289,10 @@ func (s *Server) searchForEpisodeSilent(mediaID, episodeID int) {
 	if err != nil {
 		return
 	}
+
+	// Filter blacklisted releases
+	blacklist := s.loadBlacklist(mediaID, episodeID)
+	releases = indexer.FilterBlacklisted(releases, blacklist)
 
 	best := indexer.BestRelease(releases)
 	if best == nil {
@@ -358,6 +366,10 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 		FROM quality_profiles WHERE id = ?`, profileID).Scan(
 		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
 		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+
+	// Filter blacklisted releases
+	movieBlacklist := s.loadBlacklist(mediaID, 0)
+	releases = indexer.FilterBlacklisted(releases, movieBlacklist)
 
 	for i := range releases {
 		indexer.ScoreRelease(&releases[i], &profile)

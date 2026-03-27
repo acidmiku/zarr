@@ -60,6 +60,7 @@
 		{ path: '/library', label: 'Library', icon: '▤' },
 		{ path: '/music', label: 'Music', icon: '♫' },
 		{ path: '/ratings', label: 'Ratings', icon: '★' },
+		{ path: '/import', label: 'Import', icon: '↥' },
 		{ path: '/activity', label: 'Activity', icon: '↓' },
 		{ path: '/assistant', label: 'Assistant', icon: '✦' },
 		{ path: '/settings', label: 'Settings', icon: '⚙' }
