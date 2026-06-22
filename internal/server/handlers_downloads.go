@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 )
 
@@ -50,9 +51,9 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 
 	// Get queue info from SABnzbd for progress data
 	queue, _ := s.grabber.GetQueue()
-	queueMap := make(map[string]*downloadEntry)
-	// Collect qbt hashes for torrent progress
-	qbtHashMap := make(map[string]*downloadEntry)
+	// Index-based maps — pointers into downloads[] are unsafe while the slice grows.
+	queueIdx := make(map[string]int)
+	qbtIdx := make(map[string]int)
 
 	for rows.Next() {
 		var d downloadEntry
@@ -65,6 +66,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 			&d.Status, &quality, &score, &d.StartedAt, &completedAt,
 			&d.MediaTitle, &d.MediaType,
 			&d.DownloadType, &qbtHash, &seedRatio, &albumID); err != nil {
+			slog.Warn("downloads scan failed", "error", err)
 			continue
 		}
 
@@ -88,43 +90,51 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 		if seedRatio.Valid { d.SeedRatio = &seedRatio.Float64 }
 
 		downloads = append(downloads, d)
+		idx := len(downloads) - 1
 		if d.NzoID != "" {
-			queueMap[d.NzoID] = &downloads[len(downloads)-1]
+			queueIdx[d.NzoID] = idx
 		}
 		if d.QbtHash != "" {
-			qbtHashMap[d.QbtHash] = &downloads[len(downloads)-1]
+			qbtIdx[d.QbtHash] = idx
 		}
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 
 	// Merge SABnzbd queue data
 	if queue != nil {
 		for _, slot := range queue.Slots {
-			if d, ok := queueMap[slot.NzoID]; ok {
-				d.Percentage = slot.Percentage
-				d.Speed = queue.Speed
-				d.TimeLeft = slot.TimeLeft
+			if idx, ok := queueIdx[slot.NzoID]; ok {
+				downloads[idx].Percentage = slot.Percentage
+				downloads[idx].Speed = queue.Speed
+				downloads[idx].TimeLeft = slot.TimeLeft
 			}
 		}
 	}
 
 	// Merge qBittorrent torrent data
-	if len(qbtHashMap) > 0 && s.qbt != nil {
+	if len(qbtIdx) > 0 && s.qbt != nil {
 		torrents, err := s.qbt.GetTorrents()
 		if err == nil {
 			for _, t := range torrents {
-				if d, ok := qbtHashMap[t.Hash]; ok {
-					pct := int(t.Progress * 100)
-					d.Percentage = fmt.Sprintf("%d", pct)
-					if t.DlSpeed > 0 {
-						d.Speed = formatSpeed(t.DlSpeed)
-					} else if t.UpSpeed > 0 {
-						d.Speed = formatSpeed(t.UpSpeed) + " UP"
-					}
-					ratio := t.Ratio
-					d.SeedRatio = &ratio
-					if t.ETA > 0 && t.ETA < 8640000 {
-						d.TimeLeft = formatETA(t.ETA)
-					}
+				idx, ok := qbtIdx[t.Hash]
+				if !ok {
+					continue
+				}
+				d := &downloads[idx]
+				pct := int(t.Progress * 100)
+				d.Percentage = fmt.Sprintf("%d", pct)
+				if t.DlSpeed > 0 {
+					d.Speed = formatSpeed(t.DlSpeed)
+				} else if t.UpSpeed > 0 {
+					d.Speed = formatSpeed(t.UpSpeed) + " UP"
+				}
+				ratio := t.Ratio
+				d.SeedRatio = &ratio
+				if t.ETA > 0 && t.ETA < 8640000 {
+					d.TimeLeft = formatETA(t.ETA)
 				}
 			}
 		}
@@ -173,6 +183,7 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 		var details sql.NullString
 
 		if err := rows.Scan(&a.ID, &mediaID, &epID, &a.Action, &details, &a.CreatedAt, &a.MediaTitle, &albumID); err != nil {
+			slog.Warn("activity scan failed", "error", err)
 			continue
 		}
 		if mediaID.Valid {
@@ -190,6 +201,10 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 		if details.Valid { a.Details = details.String }
 
 		activities = append(activities, a)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 
 	if activities == nil {
@@ -294,4 +309,16 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "cancelled"})
+}
+
+// handleClearFailedDownloads removes all failed downloads from the queue.
+// Hides them from the activity view; doesn't restart anything.
+func (s *Server) handleClearFailedDownloads(w http.ResponseWriter, r *http.Request) {
+	res, err := s.db.Exec(`DELETE FROM downloads WHERE status = 'failed'`)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	n, _ := res.RowsAffected()
+	writeJSON(w, 200, map[string]any{"cleared": n})
 }

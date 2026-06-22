@@ -6,7 +6,7 @@ export const downloads = writable<any[]>([]);
 export const profiles = writable<any[]>([]);
 
 // Theme
-export type ThemeName = 'dark' | 'light' | 'ember' | 'violet' | 'rose' | 'mint';
+export type ThemeName = 'dark' | 'light' | 'ember' | 'violet' | 'rose' | 'mint' | 'boringcore';
 
 export const THEMES: { id: ThemeName; label: string; group: 'dark' | 'light'; swatch: string }[] = [
 	{ id: 'dark', label: 'Obsidian', group: 'dark', swatch: '#00d4ff' },
@@ -15,6 +15,7 @@ export const THEMES: { id: ThemeName; label: string; group: 'dark' | 'light'; sw
 	{ id: 'light', label: 'Light', group: 'light', swatch: '#0891b2' },
 	{ id: 'rose', label: 'Rose', group: 'light', swatch: '#e11d48' },
 	{ id: 'mint', label: 'Mint', group: 'light', swatch: '#10b981' },
+	{ id: 'boringcore', label: 'Boringcore', group: 'light', swatch: '#316ac5' },
 ];
 
 const VALID_THEMES: Set<string> = new Set(THEMES.map(t => t.id));

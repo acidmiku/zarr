@@ -640,3 +640,450 @@ h1, h2, h3, h4 {
 .stagger-grid > *:nth-child(9) { animation-delay: 240ms; }
 .stagger-grid > *:nth-child(10) { animation-delay: 270ms; }
 .stagger-grid > *:nth-child(n+11) { animation-delay: 300ms; }
+
+/* ============================================================================
+   Boringcore — mid-2000s Corporate-Professional
+   Windows XP Luna / Office 2003 / SharePoint 2007 / PeopleSoft energy.
+   Sharp corners. Chiseled bevels. Tahoma. Tan and selection-blue.
+   ============================================================================ */
+[data-theme="boringcore"] {
+  /* Surfaces — always solid, never translucent */
+  --bg-base: #ece9d8;              /* XP Luna tan */
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-inset: #f4f2e7;
+  --bg-overlay: rgba(10, 36, 106, 0.35);
+  --bg-hover: #e6edf8;
+  --bg-active: #cfe0fa;
+  --bg-input: #ffffff;
+
+  /* Borders — sharp and gray */
+  --border: #a8a298;
+  --border-subtle: #d4d0c8;
+  --border-strong: #4f4f4f;
+
+  /* Text — near-black, workhorse */
+  --text-primary: #0a0a0a;
+  --text-secondary: #383838;
+  --text-muted: #6b6b6b;
+  --text-dim: #9a948a;
+  --text-inverse: #ffffff;
+
+  /* Accent — Windows XP "selection blue" */
+  --accent: #316ac5;
+  --accent-hover: #4280d6;
+  --accent-muted: #7b9dd0;
+  --accent-glow: transparent;
+  --accent-subtle: #e1e8f5;
+  --accent-bg: #cfe0fa;
+
+  /* Semantic — muted corporate palette */
+  --success: #167b3b;
+  --success-bg: #e6f4ea;
+  --success-border: #6aaa84;
+  --warning: #8a6d00;
+  --warning-bg: #fff8d4;
+  --warning-border: #d4b94e;
+  --danger: #a81313;
+  --danger-bg: #fbe5e5;
+  --danger-border: #c48282;
+  --info: #1f497d;
+  --info-bg: #e1e8f5;
+  --info-border: #7a99c6;
+  --gold: #a77b0c;
+
+  /* Status */
+  --status-wanted: #8a6d00;
+  --status-wanted-bg: #fff8d4;
+  --status-wanted-border: #d4b94e;
+  --status-searching: #1f497d;
+  --status-searching-bg: #e1e8f5;
+  --status-searching-border: #7a99c6;
+  --status-available: #167b3b;
+  --status-available-bg: #e6f4ea;
+  --status-available-border: #6aaa84;
+  --status-unavailable: #888888;
+
+  /* Type badges */
+  --badge-anime: #7b3aa8;
+  --badge-movie: #1f497d;
+  --badge-series: #167b3b;
+
+  /* Glass — flattened to solid */
+  --glass-bg: #ece9d8;
+  --glass-border: #a8a298;
+  --glass-blur: 0px;
+  --glass-highlight: transparent;
+
+  /* Shadows — subtle drop only */
+  --shadow-sm: 0 1px 0 #ffffff inset, 0 0 0 1px #a8a298;
+  --shadow-md: 1px 1px 0 rgba(0, 0, 0, 0.06), 0 0 0 1px #a8a298;
+  --shadow-lg: 2px 2px 6px rgba(0, 0, 0, 0.18), 0 0 0 1px #4f4f4f;
+  --shadow-glow: none;
+
+  /* Radii — square it up */
+  --radius-sm: 0px;
+  --radius-md: 1px;
+  --radius-lg: 2px;
+  --radius-xl: 2px;
+  --radius-2xl: 3px;
+
+  /* Fonts — system UI fonts of the era */
+  --font-display: 'Trebuchet MS', Tahoma, Geneva, Verdana, sans-serif;
+  --font-body: Tahoma, Verdana, Geneva, sans-serif;
+
+  /* No grain, no mesh */
+  --grain-opacity: 0;
+  --mesh-color-1: transparent;
+  --mesh-color-2: transparent;
+  --mesh-color-3: transparent;
+
+  /* Scrollbar — classic thick gray */
+  --scrollbar-thumb: #b7b2a6;
+  --scrollbar-thumb-hover: #918c81;
+
+  /* Sidebar */
+  --sidebar-width: 76px;
+  --sidebar-expanded: 220px;
+}
+
+/* ----- Boringcore overrides — undo the modern flourishes ----- */
+
+[data-theme="boringcore"] html {
+  font-size: 13px; /* denser, classic UI */
+}
+
+/* Kill the mesh and grain overlays */
+[data-theme="boringcore"] body::before,
+[data-theme="boringcore"] body::after {
+  display: none !important;
+}
+
+/* Kill backdrop blur everywhere */
+[data-theme="boringcore"] * {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Body — tan hatch texture, no transitions */
+[data-theme="boringcore"] body {
+  background:
+    linear-gradient(#ece9d8, #ece9d8),
+    repeating-linear-gradient(45deg, rgba(0,0,0,0.015) 0 1px, transparent 1px 3px);
+  background-blend-mode: multiply;
+  transition: none;
+}
+
+/* Headings — serifed weight but keep sans; no letter-spacing tricks */
+[data-theme="boringcore"] h1,
+[data-theme="boringcore"] h2,
+[data-theme="boringcore"] h3,
+[data-theme="boringcore"] h4 {
+  font-family: var(--font-display);
+  letter-spacing: 0;
+  font-weight: bold;
+  line-height: 1.25;
+}
+
+/* H1s become Windows-style title bars — loud commitment to the era */
+[data-theme="boringcore"] .content h1,
+[data-theme="boringcore"] main h1 {
+  font-size: 0.95rem;
+  font-weight: bold;
+  color: #ffffff;
+  padding: 4px 10px;
+  margin: 0 0 12px 0;
+  background: linear-gradient(180deg, #0a246a 0%, #1e3e8e 50%, #0a246a 100%);
+  border: 1px solid #000000;
+  border-bottom: 1px solid #000000;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.25);
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.4);
+  letter-spacing: 0;
+}
+
+/* Scrollbar — classic wide gray */
+[data-theme="boringcore"] ::-webkit-scrollbar {
+  width: 16px;
+  height: 16px;
+}
+[data-theme="boringcore"] ::-webkit-scrollbar-track {
+  background: #ece9d8;
+  border-left: 1px solid #a8a298;
+}
+[data-theme="boringcore"] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(90deg, #f0eee5, #b7b2a6);
+  border: 1px solid #4f4f4f;
+  border-radius: 0;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.8);
+}
+[data-theme="boringcore"] ::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(90deg, #e8e3d2, #a39c8d);
+}
+[data-theme="boringcore"] ::-webkit-scrollbar-button {
+  background: #ece9d8;
+  border: 1px solid #a8a298;
+  display: block;
+  height: 16px;
+}
+
+/* Selection — classic XP highlight */
+[data-theme="boringcore"] ::selection {
+  background: #316ac5;
+  color: #ffffff;
+}
+
+/* -------- Sidebar — classic Windows "task pane" -------- */
+[data-theme="boringcore"] .sidebar-inner {
+  background: linear-gradient(180deg, #7c9ad8 0%, #4264a8 12%, #ece9d8 12%, #ece9d8 100%) !important;
+  border-right: 1px solid #4f4f4f !important;
+  padding: 0 !important;
+}
+[data-theme="boringcore"] .sidebar-logo {
+  padding: 6px 10px !important;
+  margin: 0 !important;
+  background: transparent;
+  color: #ffffff;
+  height: auto;
+}
+[data-theme="boringcore"] .logo-icon {
+  color: #ffffff;
+  filter: none !important;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.4);
+  font-size: 1.15rem;
+  width: 28px;
+}
+[data-theme="boringcore"] .logo-text {
+  background: none !important;
+  -webkit-text-fill-color: #ffffff !important;
+  color: #ffffff;
+  font-family: var(--font-display);
+  font-weight: bold;
+  letter-spacing: 0;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.4);
+  font-size: 0.95rem;
+}
+
+[data-theme="boringcore"] .nav-links {
+  padding: 6px 4px !important;
+  gap: 0 !important;
+}
+[data-theme="boringcore"] .nav-item {
+  padding: 3px 8px !important;
+  border-radius: 0 !important;
+  color: #0a0a0a !important;
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+  height: 22px;
+}
+[data-theme="boringcore"] .nav-item:hover {
+  background: #e6edf8 !important;
+  border: 1px dotted #316ac5;
+}
+[data-theme="boringcore"] .nav-item.active {
+  background: #316ac5 !important;
+  color: #ffffff !important;
+  border: 1px solid #0a246a;
+}
+[data-theme="boringcore"] .nav-item.active:hover {
+  background: #4280d6 !important;
+}
+[data-theme="boringcore"] .active-bar {
+  display: none !important;
+}
+[data-theme="boringcore"] .nav-icon {
+  font-size: 0.95rem;
+  width: 20px;
+  transform: none !important;
+}
+[data-theme="boringcore"] .nav-item:hover .nav-icon {
+  transform: none !important;
+}
+[data-theme="boringcore"] .nav-label {
+  font-size: 0.82rem;
+  font-weight: normal;
+}
+[data-theme="boringcore"] .nav-badge {
+  background: #a81313 !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+  border-radius: 1px !important;
+  font-size: 0.62rem;
+  font-weight: bold;
+  top: 4px;
+  right: 6px;
+  min-width: 14px;
+  height: 12px;
+  padding: 0 3px !important;
+}
+[data-theme="boringcore"] .sidebar:hover .nav-badge {
+  font-size: 0.62rem;
+  min-width: 14px;
+  height: 12px;
+}
+[data-theme="boringcore"] .sidebar-footer {
+  border-top: 1px solid #a8a298 !important;
+  background: #ece9d8;
+  padding: 6px 4px !important;
+}
+[data-theme="boringcore"] .swatch {
+  border-radius: 0 !important;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #4f4f4f !important;
+  box-shadow: inset 1px 1px 0 rgba(255,255,255,0.4);
+}
+[data-theme="boringcore"] .swatch:hover {
+  transform: none !important;
+}
+[data-theme="boringcore"] .swatch.active {
+  box-shadow: inset 1px 1px 0 rgba(0,0,0,0.5), 0 0 0 1px #0a246a !important;
+  border-color: #0a246a !important;
+}
+
+/* -------- Content area -------- */
+[data-theme="boringcore"] .content {
+  padding: 12px 16px !important;
+  animation: none !important;
+}
+
+/* -------- Mobile nav — solid grey taskbar -------- */
+[data-theme="boringcore"] .mobile-nav {
+  background: linear-gradient(180deg, #4264a8 0%, #2a4580 100%) !important;
+  border-top: 1px solid #000000 !important;
+  border-radius: 0 !important;
+}
+[data-theme="boringcore"] .mobile-item {
+  color: rgba(255,255,255,0.8) !important;
+}
+[data-theme="boringcore"] .mobile-item.active {
+  color: #ffffff !important;
+  background: rgba(255,255,255,0.12);
+}
+[data-theme="boringcore"] .mobile-badge {
+  background: #a81313 !important;
+  color: #ffffff !important;
+  border-radius: 1px !important;
+}
+
+/* -------- Notifications — flat panels with icons -------- */
+[data-theme="boringcore"] .notif {
+  border-radius: 1px !important;
+  box-shadow: 2px 2px 6px rgba(0,0,0,0.25) !important;
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  padding: 6px 10px !important;
+  border-width: 1px !important;
+}
+
+/* -------- Boot screen -------- */
+[data-theme="boringcore"] .boot-icon {
+  animation: none !important;
+  color: #316ac5;
+  opacity: 0.65;
+}
+
+/* -------- Generic form chrome — sunken inputs, raised buttons -------- */
+[data-theme="boringcore"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+[data-theme="boringcore"] select,
+[data-theme="boringcore"] textarea {
+  background: #ffffff !important;
+  border: 1px solid #4f4f4f !important;
+  border-top-color: #808080 !important;
+  border-left-color: #808080 !important;
+  border-radius: 0 !important;
+  box-shadow: inset 1px 1px 0 #d0cdc0 !important;
+  padding: 3px 5px !important;
+  font-family: var(--font-body);
+  font-size: 0.82rem !important;
+  color: #0a0a0a !important;
+}
+[data-theme="boringcore"] input:focus,
+[data-theme="boringcore"] select:focus,
+[data-theme="boringcore"] textarea:focus {
+  outline: 1px dotted #316ac5 !important;
+  outline-offset: -3px !important;
+  border-color: #316ac5 !important;
+}
+
+[data-theme="boringcore"] button:not(.swatch):not(.nav-item):not(.mobile-item):not(.tab) {
+  background: linear-gradient(180deg, #fdfdfb 0%, #ece9d8 50%, #d4d0c3 100%) !important;
+  color: #0a0a0a !important;
+  border: 1px solid #4f4f4f !important;
+  border-top-color: #808080 !important;
+  border-left-color: #808080 !important;
+  border-radius: 1px !important;
+  padding: 3px 14px !important;
+  font-family: var(--font-body);
+  font-size: 0.82rem !important;
+  font-weight: normal !important;
+  box-shadow: inset 1px 1px 0 #ffffff !important;
+  text-shadow: none !important;
+  min-height: 23px;
+}
+[data-theme="boringcore"] button:not(.swatch):not(.nav-item):not(.mobile-item):not(.tab):hover {
+  background: linear-gradient(180deg, #ffffff 0%, #f0ecd9 50%, #d8d3c1 100%) !important;
+  border-color: #316ac5 !important;
+}
+[data-theme="boringcore"] button:not(.swatch):not(.nav-item):not(.mobile-item):not(.tab):active {
+  background: #d4d0c3 !important;
+  box-shadow: inset 1px 1px 2px rgba(0,0,0,0.25) !important;
+  border-top-color: #4f4f4f !important;
+  border-left-color: #4f4f4f !important;
+  border-bottom-color: #808080 !important;
+  border-right-color: #808080 !important;
+}
+[data-theme="boringcore"] button:disabled {
+  color: #a8a298 !important;
+  text-shadow: 1px 1px 0 #ffffff !important;
+  cursor: not-allowed;
+}
+
+/* Cards / panels — flatten to chiseled surfaces */
+[data-theme="boringcore"] [class*="card"],
+[data-theme="boringcore"] [class*="panel"],
+[data-theme="boringcore"] [class*="Card"],
+[data-theme="boringcore"] [class*="Panel"] {
+  background: #ffffff !important;
+  border-radius: 0 !important;
+  box-shadow: 0 0 0 1px #a8a298, inset 1px 1px 0 rgba(255,255,255,0.6) !important;
+}
+
+/* Kill dramatic transitions; keep snappy functional ones */
+[data-theme="boringcore"] * {
+  transition-duration: 80ms !important;
+  transition-timing-function: linear !important;
+}
+[data-theme="boringcore"] .sidebar {
+  transition: width 160ms linear !important;
+}
+
+/* Kill all glow-y box-shadows globally by zeroing --accent-glow users */
+[data-theme="boringcore"] [style*="box-shadow"],
+[data-theme="boringcore"] [class*="glow"] {
+  box-shadow: none;
+}
+
+/* Stagger animations — compressed or off */
+[data-theme="boringcore"] .stagger-grid > * {
+  animation-duration: 0.15s !important;
+  animation-timing-function: linear !important;
+}
+
+/* Gradient-text anywhere (besides logo) → solid */
+[data-theme="boringcore"] [style*="-webkit-text-fill-color"],
+[data-theme="boringcore"] [style*="background-clip: text"] {
+  -webkit-text-fill-color: currentColor !important;
+  background: none !important;
+}
+
+/* Links — classic blue underline */
+[data-theme="boringcore"] a:not(.nav-item):not(.mobile-item):not(.sidebar-logo) {
+  color: #0a3d8f;
+}
+[data-theme="boringcore"] a:not(.nav-item):not(.mobile-item):not(.sidebar-logo):hover {
+  text-decoration: underline;
+  color: #316ac5;
+}
+[data-theme="boringcore"] a:not(.nav-item):not(.mobile-item):not(.sidebar-logo):visited {
+  color: #5a2d8f;
+}

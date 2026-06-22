@@ -1,10 +1,12 @@
 <script>
 	import { onMount, onDestroy } from 'svelte';
 	import { api } from '$lib/api';
+	import { notify } from '$lib/stores/app';
 	import StatusBadge from './StatusBadge.svelte';
 
 	let downloads = [];
 	let interval;
+	let clearing = false;
 
 	onMount(() => {
 		loadDownloads();
@@ -34,9 +36,32 @@
 			loadDownloads();
 		} catch {}
 	}
+
+	async function clearFailed() {
+		clearing = true;
+		try {
+			const res = await api.clearFailedDownloads();
+			notify(`Cleared ${res?.cleared ?? 0} failed`, 'success');
+			loadDownloads();
+		} catch {
+			notify('Failed to clear', 'error');
+		} finally {
+			clearing = false;
+		}
+	}
+
+	$: failedCount = downloads.filter(d => d.status === 'failed').length;
 </script>
 
 <div class="queue">
+	{#if failedCount > 0}
+		<div class="queue-toolbar">
+			<button class="clear-btn" disabled={clearing} on:click={clearFailed}>
+				Clear {failedCount} failed
+			</button>
+		</div>
+	{/if}
+
 	{#if downloads.length === 0}
 		<div class="empty">No active downloads</div>
 	{:else}
@@ -90,6 +115,35 @@
 		color: var(--text-muted);
 		font-family: var(--font-body);
 		padding: 2rem;
+	}
+
+	.queue-toolbar {
+		display: flex;
+		justify-content: flex-end;
+		margin-bottom: 0.25rem;
+	}
+
+	.clear-btn {
+		background: transparent;
+		border: 1px solid var(--danger-border);
+		color: var(--danger);
+		padding: 0.35rem 0.85rem;
+		border-radius: var(--radius-sm);
+		font-family: var(--font-body);
+		font-size: 0.78rem;
+		font-weight: 600;
+		letter-spacing: -0.005em;
+		cursor: pointer;
+		transition: background 0.15s ease, color 0.15s ease;
+	}
+
+	.clear-btn:hover:not(:disabled) {
+		background: var(--danger-bg);
+	}
+
+	.clear-btn:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	.download-item {

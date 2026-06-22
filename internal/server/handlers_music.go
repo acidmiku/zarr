@@ -412,6 +412,7 @@ func (s *Server) handleListMusicLibrary(w http.ResponseWriter, r *http.Request) 
 		var a libraryAlbum
 		if err := rows.Scan(&a.ID, &a.Title, &a.Year, &a.AlbumType, &a.Status, &a.ReleaseGroupID,
 			&a.ImageURL, &a.TrackCount, &a.Rating, &a.RatingComment, &a.ArtistName, &a.ArtistMBID); err != nil {
+			slog.Warn("music album scan failed", "error", err)
 			continue
 		}
 		if a.Year.Valid {
@@ -427,6 +428,10 @@ func (s *Server) handleListMusicLibrary(w http.ResponseWriter, r *http.Request) 
 			a.RatingCommentV = a.RatingComment.String
 		}
 		albums = append(albums, a)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 
 	if albums == nil {
@@ -462,6 +467,7 @@ func (s *Server) handleListMusicArtists(w http.ResponseWriter, r *http.Request) 
 	for rows.Next() {
 		var a libraryArtist
 		if err := rows.Scan(&a.ID, &a.MBID, &a.Name, &a.ImageURL, &a.AlbumCount, &a.AvailableCount); err != nil {
+			slog.Warn("artist scan failed", "error", err)
 			continue
 		}
 		if a.MBID.Valid {
@@ -471,6 +477,10 @@ func (s *Server) handleListMusicArtists(w http.ResponseWriter, r *http.Request) 
 			a.ImageURLVal = a.ImageURL.String
 		}
 		artists = append(artists, a)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 	if artists == nil {
 		artists = []libraryArtist{}

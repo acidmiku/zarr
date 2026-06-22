@@ -66,10 +66,21 @@
 		{ path: '/settings', label: 'Settings', icon: '⚙' }
 	];
 
-	function isActive(path) {
-		if (path === '/') return currentPath === '/';
-		return currentPath.startsWith(path);
-	}
+	// Reactive: re-evaluate which item is active whenever currentPath changes.
+	// Inline-function checks like class:active={isActive(path)} can miss
+	// updates because Svelte doesn't see currentPath as a template dep.
+	$: activePath = (() => {
+		if (currentPath === '/') return '/';
+		// Longest matching prefix wins (e.g. /library/123 → /library, not /).
+		let best = '';
+		for (const item of navItems) {
+			if (item.path === '/') continue;
+			if (currentPath.startsWith(item.path) && item.path.length > best.length) {
+				best = item.path;
+			}
+		}
+		return best;
+	})();
 </script>
 
 {#if !loaded}
@@ -92,9 +103,9 @@
 					<a
 						href={item.path}
 						class="nav-item"
-						class:active={isActive(item.path)}
+						class:active={item.path === activePath}
 					>
-						{#if isActive(item.path)}
+						{#if item.path === activePath}
 							<span class="active-bar"></span>
 						{/if}
 						<span class="nav-icon">{item.icon}</span>
@@ -125,7 +136,7 @@
 	<!-- Mobile bottom nav -->
 	<nav class="mobile-nav">
 		{#each navItems.slice(0, 5) as item}
-			<a href={item.path} class="mobile-item" class:active={isActive(item.path)}>
+			<a href={item.path} class="mobile-item" class:active={item.path === activePath}>
 				<span class="mobile-icon">{item.icon}</span>
 				{#if item.path === '/activity' && activityCount > 0}
 					<span class="mobile-badge">{activityCount}</span>

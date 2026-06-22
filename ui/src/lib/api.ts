@@ -49,6 +49,7 @@ export const api = {
 	getDownloads: () => request('GET', '/downloads'),
 	retryDownload: (id: number) => request('POST', `/downloads/${id}/retry`),
 	cancelDownload: (id: number) => request('DELETE', `/downloads/${id}`),
+	clearFailedDownloads: () => request('DELETE', '/downloads/failed'),
 
 	// Activity
 	getActivity: (page = 1, limit = 50) => request('GET', `/activity?page=${page}&limit=${limit}`),

@@ -28,10 +28,11 @@ func New(proxyURL string) (*Clients, error) {
 		// Use system DNS (which Docker configures to use custom DNS servers)
 	}
 
-	// Direct client ignores all proxy environment variables
+	// Direct client ignores all proxy environment variables.
+	// Retry transport handles transient EOFs / 5xx automatically.
 	direct := &http.Client{
 		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
+		Transport: wrapRetry(&http.Transport{
 			Proxy:                 nil, // Explicitly disable proxy
 			DialContext:           dialer.DialContext,
 			ForceAttemptHTTP2:     true,
@@ -39,7 +40,7 @@ func New(proxyURL string) (*Clients, error) {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-		},
+		}),
 	}
 
 	var proxyClient *http.Client
@@ -50,13 +51,13 @@ func New(proxyURL string) (*Clients, error) {
 		}
 		proxyClient = &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: transport,
+			Transport: wrapRetry(transport),
 		}
 	} else {
 		// When no proxy configured, explicitly ignore environment proxy vars
 		proxyClient = &http.Client{
 			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
+			Transport: wrapRetry(&http.Transport{
 				Proxy:                 nil, // Explicitly disable proxy
 				DialContext:           dialer.DialContext,
 				ForceAttemptHTTP2:     true,
@@ -64,7 +65,7 @@ func New(proxyURL string) (*Clients, error) {
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
-			},
+			}),
 		}
 	}
 

@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -81,6 +82,7 @@ func (s *Server) handleListRatings(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&item.ID, &item.TMDBID, &item.MediaType, &item.Rating,
 				&comment, &item.CreatedAt, &item.UpdatedAt,
 				&item.Title, &item.PosterURL, &item.Year, &anime, &item.MediaID); err != nil {
+				slog.Warn("rating scan failed", "error", err)
 				continue
 			}
 			if comment.Valid {
@@ -88,6 +90,10 @@ func (s *Server) handleListRatings(w http.ResponseWriter, r *http.Request) {
 			}
 			item.Anime = anime == 1
 			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			writeError(w, 500, "database error")
+			return
 		}
 	}
 
@@ -107,6 +113,7 @@ func (s *Server) handleListRatings(w http.ResponseWriter, r *http.Request) {
 				var updatedAt sql.NullString
 				if err := musicRows.Scan(&albumID, &title, &year, &rating, &comment,
 					&releaseGroupID, &imageURL, &updatedAt, &artistName); err != nil {
+					slog.Warn("music rating scan failed", "error", err)
 					continue
 				}
 				item := ratingItem{
@@ -130,6 +137,9 @@ func (s *Server) handleListRatings(w http.ResponseWriter, r *http.Request) {
 					item.UpdatedAt = updatedAt.String
 				}
 				items = append(items, item)
+			}
+			if err := musicRows.Err(); err != nil {
+				slog.Warn("music ratings iteration failed", "error", err)
 			}
 		}
 	}

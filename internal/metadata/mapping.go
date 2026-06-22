@@ -55,19 +55,9 @@ func NewMapping(client *http.Client) *Mapping {
 func (m *Mapping) Refresh() error {
 	slog.Info("refreshing anime ID mapping")
 
-	resp, err := m.client.Get(mappingURL)
+	data, err := m.fetchMapping()
 	if err != nil {
-		return fmt.Errorf("fetch mapping: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("mapping HTTP %d", resp.StatusCode)
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read mapping: %w", err)
+		return err
 	}
 
 	var list animeList
@@ -145,6 +135,24 @@ func (m *Mapping) FindByTVDBID(tvdbID int) []MappingEntry {
 		}
 	}
 	return results
+}
+
+// fetchMapping GETs the mapping URL. Transport-level retry handles transient errors.
+func (m *Mapping) fetchMapping() ([]byte, error) {
+	resp, err := m.client.Get(mappingURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetch mapping: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("mapping HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read mapping: %w", err)
+	}
+	return body, nil
 }
 
 // NeedsRefresh returns true if the mapping data is stale.

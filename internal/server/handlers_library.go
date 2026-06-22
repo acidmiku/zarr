@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -305,6 +306,7 @@ func (s *Server) handleListLibrary(w http.ResponseWriter, r *http.Request) {
 		var e libraryEntry
 		if err := rows.Scan(&e.ID, &e.Type, &e.Title, &e.Year, &e.Anime, &e.TMDBID, &e.AniListID,
 			&e.PosterURL, &e.Status, &e.Rating, &e.Genres, &e.AddedAt); err != nil {
+			slog.Warn("library scan failed", "error", err)
 			continue
 		}
 		if e.Year.Valid {
@@ -328,6 +330,10 @@ func (s *Server) handleListLibrary(w http.ResponseWriter, r *http.Request) {
 			e.GenresVal = json.RawMessage("[]")
 		}
 		items = append(items, e)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "database error")
+		return
 	}
 
 	if items == nil {

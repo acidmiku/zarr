@@ -129,6 +129,30 @@ func (c *NewznabClient) SearchByText(idx IndexerConfig, query string) ([]Newznab
 	return c.fetch(u, idx.Name)
 }
 
+// fetchRaw performs an HTTP GET. Retries on transport errors / 5xx / 429 are
+// handled by the retry transport wrapping c.client.
+func (c *NewznabClient) fetchRaw(rawURL, indexerName string) ([]byte, error) {
+	resp, err := c.client.Get(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("newznab request to %s: %w", indexerName, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response from %s: %w", indexerName, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		snippet := string(body)
+		if len(snippet) > 200 {
+			snippet = snippet[:200]
+		}
+		return nil, fmt.Errorf("newznab %s HTTP %d: %s", indexerName, resp.StatusCode, snippet)
+	}
+	return body, nil
+}
+
 // TestConnection tests connectivity to an indexer.
 func (c *NewznabClient) TestConnection(idx IndexerConfig) error {
 	u := buildURL(idx.URL, map[string]string{
@@ -148,20 +172,9 @@ func (c *NewznabClient) TestConnection(idx IndexerConfig) error {
 func (c *NewznabClient) fetch(rawURL, indexerName string) ([]NewznabItem, error) {
 	slog.Debug("newznab query", "indexer", indexerName, "url", rawURL)
 
-	resp, err := c.client.Get(rawURL)
+	data, err := c.fetchRaw(rawURL, indexerName)
 	if err != nil {
-		return nil, fmt.Errorf("newznab request to %s: %w", indexerName, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("newznab %s HTTP %d: %s", indexerName, resp.StatusCode, string(body))
-	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response from %s: %w", indexerName, err)
+		return nil, err
 	}
 
 	var nzbResp NewznabResponse

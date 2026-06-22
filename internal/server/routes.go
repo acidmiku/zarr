@@ -27,6 +27,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/activity", s.handleGetActivity)
 	s.mux.HandleFunc("POST /api/downloads/{id}/retry", s.handleRetryDownload)
 	s.mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
+	s.mux.HandleFunc("DELETE /api/downloads/failed", s.handleClearFailedDownloads)
 
 	// Releases (manual search)
 	s.mux.HandleFunc("GET /api/releases", s.handleSearchReleases)
