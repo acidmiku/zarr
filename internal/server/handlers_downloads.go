@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"mediaforge/internal/grabber"
 	"net/http"
+	"os"
 )
 
 func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
@@ -17,7 +19,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 		FROM downloads d
 		LEFT JOIN media_items m ON d.media_item_id = m.id
 		LEFT JOIN albums a ON d.album_id = a.id
-		WHERE d.status NOT IN ('imported')
+		WHERE d.status NOT IN ('imported', 'cancelled')
 		ORDER BY d.started_at DESC`)
 	if err != nil {
 		writeError(w, 500, "database error")
@@ -49,8 +51,6 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 
 	var downloads []downloadEntry
 
-	// Get queue info from SABnzbd for progress data
-	queue, _ := s.grabber.GetQueue()
 	// Index-based maps — pointers into downloads[] are unsafe while the slice grows.
 	queueIdx := make(map[string]int)
 	qbtIdx := make(map[string]int)
@@ -82,25 +82,43 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 			v := int(albumID.Int64)
 			d.AlbumID = &v
 		}
-		if nzoID.Valid { d.NzoID = nzoID.String }
-		if quality.Valid { d.Quality = quality.String }
-		if score.Valid { d.Score = int(score.Int64) }
-		if completedAt.Valid { d.CompletedAt = completedAt.String }
-		if qbtHash.Valid { d.QbtHash = qbtHash.String }
-		if seedRatio.Valid { d.SeedRatio = &seedRatio.Float64 }
+		if nzoID.Valid {
+			d.NzoID = nzoID.String
+		}
+		if quality.Valid {
+			d.Quality = quality.String
+		}
+		if score.Valid {
+			d.Score = int(score.Int64)
+		}
+		if completedAt.Valid {
+			d.CompletedAt = completedAt.String
+		}
+		if qbtHash.Valid {
+			d.QbtHash = qbtHash.String
+		}
+		if seedRatio.Valid {
+			d.SeedRatio = &seedRatio.Float64
+		}
 
 		downloads = append(downloads, d)
 		idx := len(downloads) - 1
-		if d.NzoID != "" {
+		if d.NzoID != "" && d.Status != "failed" && d.Status != "completed" {
 			queueIdx[d.NzoID] = idx
 		}
-		if d.QbtHash != "" {
+		if d.QbtHash != "" && d.Status != "failed" && d.Status != "completed" {
 			qbtIdx[d.QbtHash] = idx
 		}
 	}
 	if err := rows.Err(); err != nil {
 		writeError(w, 500, "database error")
 		return
+	}
+
+	rows.Close()
+	var queue *grabber.SABQueue
+	if len(queueIdx) > 0 && s.grabber != nil {
+		queue, _ = s.grabber.GetQueue()
 	}
 
 	// Merge SABnzbd queue data
@@ -150,6 +168,15 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 	page := queryInt(r, "page", 1)
 	limit := queryInt(r, "limit", 50)
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
 	offset := (page - 1) * limit
 
 	rows, err := s.db.Query(`SELECT a.id, a.media_item_id, a.episode_id, a.action, a.details, a.created_at,
@@ -198,7 +225,9 @@ func (s *Server) handleGetActivity(w http.ResponseWriter, r *http.Request) {
 			v := int(albumID.Int64)
 			a.AlbumID = &v
 		}
-		if details.Valid { a.Details = details.String }
+		if details.Valid {
+			a.Details = details.String
+		}
 
 		activities = append(activities, a)
 	}
@@ -248,22 +277,40 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 
 	var mediaItemID sql.NullInt64
 	var epID, albumID sql.NullInt64
-	err = s.db.QueryRow(`SELECT media_item_id, episode_id, album_id FROM downloads WHERE id = ? AND status = 'failed'`,
-		id).Scan(&mediaItemID, &epID, &albumID)
+	var path sql.NullString
+	var kind string
+	err = s.db.QueryRow(`SELECT media_item_id, episode_id, album_id, download_path, download_type FROM downloads WHERE id = ? AND status = 'failed'`,
+		id).Scan(&mediaItemID, &epID, &albumID, &path, &kind)
 	if err != nil {
 		writeError(w, 404, "failed download not found")
 		return
 	}
-
+	// Retry an already downloaded file before requesting another release.
+	if path.Valid && path.String != "" {
+		if _, err := os.Stat(path.String); err == nil {
+			if kind == "torrent" {
+				err = s.processor.ProcessTorrent(id, path.String)
+			} else {
+				err = s.processor.Process(id, path.String)
+			}
+			if err != nil {
+				writeError(w, 422, "Import failed: "+err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]string{"status": "imported"})
+			return
+		}
+	}
 	if epID.Valid && mediaItemID.Valid {
-		s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, epID.Int64)
-		s.searchForEpisodeSilent(int(mediaItemID.Int64), int(epID.Int64))
+		s.db.Exec(`UPDATE episodes SET status='wanted' WHERE id=? AND status!='available'`, epID.Int64)
+		s.searchForEpisode(w, int(mediaItemID.Int64), int(epID.Int64))
+		return
 	} else if mediaItemID.Valid {
-		go func() {
-			s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
-		}()
+		s.db.Exec(`UPDATE media_items SET status='wanted' WHERE id=? AND status!='available'`, mediaItemID.Int64)
+		s.searchForMovie(w, int(mediaItemID.Int64))
+		return
 	} else if albumID.Valid {
-		s.db.Exec(`UPDATE albums SET status = 'wanted' WHERE id = ?`, albumID.Int64)
+		s.db.Exec(`UPDATE albums SET status='wanted' WHERE id=? AND status!='available'`, albumID.Int64)
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "retrying"})
@@ -286,26 +333,20 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove from download client
-	if dlType == "torrent" && qbtHash.Valid && qbtHash.String != "" && s.qbt != nil {
-		s.qbt.DeleteTorrent(qbtHash.String, true)
-	} else if nzoID.Valid && nzoID.String != "" {
-		s.grabber.DeleteFromQueue(nzoID.String)
+	if err := s.cancelClientDownload(id, dlType, qbtHash, nzoID); err != nil {
+		writeError(w, 502, "Cancellation failed: "+err.Error())
+		return
 	}
-
-	// Update database
-	s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ?`, id)
+	if _, err := s.db.Exec(`UPDATE downloads SET status='cancelled' WHERE id=?`, id); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
 	if epID.Valid {
-		s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, epID.Int64)
+		s.db.Exec(`UPDATE episodes SET status='wanted' WHERE id=? AND status!='available' AND NOT EXISTS (SELECT 1 FROM downloads WHERE episode_id=? AND id!=? AND status IN ('queued','downloading','extracting'))`, epID.Int64, epID.Int64, id)
 	} else if mediaItemID.Valid {
-		var activeCount int
-		s.db.QueryRow(`SELECT COUNT(*) FROM downloads WHERE media_item_id = ? AND id != ? AND status NOT IN ('imported', 'failed')`,
-			mediaItemID.Int64, id).Scan(&activeCount)
-		if activeCount == 0 {
-			s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
-		}
+		s.db.Exec(`UPDATE media_items SET status='wanted' WHERE id=? AND status!='available' AND NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id=? AND id!=? AND status IN ('queued','downloading','extracting'))`, mediaItemID.Int64, mediaItemID.Int64, id)
 	} else if albumID.Valid {
-		s.db.Exec(`UPDATE albums SET status = 'wanted' WHERE id = ?`, albumID.Int64)
+		s.db.Exec(`UPDATE albums SET status='wanted' WHERE id=? AND status!='available' AND NOT EXISTS (SELECT 1 FROM downloads WHERE album_id=? AND id!=? AND status IN ('queued','downloading','extracting'))`, albumID.Int64, albumID.Int64, id)
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "cancelled"})

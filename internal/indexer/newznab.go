@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -28,7 +29,7 @@ type IndexerConfig struct {
 	APIKey       string
 	Priority     int
 	Enabled      bool
-	Type         string   // "newznab" or "rutracker"
+	Type         string // "newznab" or "rutracker"
 	Username     string
 	Password     string
 	ContentTypes []string // e.g. ["movie","series","anime","music"]
@@ -36,7 +37,7 @@ type IndexerConfig struct {
 
 // NewznabResponse represents the RSS/XML response from a Newznab API.
 type NewznabResponse struct {
-	XMLName xml.Name      `xml:"rss"`
+	XMLName xml.Name       `xml:"rss"`
 	Channel NewznabChannel `xml:"channel"`
 }
 
@@ -78,6 +79,9 @@ func buildURL(base string, params map[string]string) string {
 		}
 		return base + "?" + q.Encode()
 	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/api"
+	}
 	q := u.Query()
 	for k, v := range params {
 		q.Set(k, v)
@@ -90,7 +94,7 @@ func buildURL(base string, params map[string]string) string {
 func (c *NewznabClient) SearchMovieByIMDB(idx IndexerConfig, imdbID string) ([]NewznabItem, error) {
 	id := strings.TrimPrefix(imdbID, "tt")
 	u := buildURL(idx.URL, map[string]string{
-		"t": "movie", "imdbid": "tt" + id, "apikey": idx.APIKey,
+		"t": "movie", "imdbid": id, "apikey": idx.APIKey,
 	})
 	return c.fetch(u, idx.Name)
 }
@@ -134,22 +138,32 @@ func (c *NewznabClient) SearchByText(idx IndexerConfig, query string) ([]Newznab
 func (c *NewznabClient) fetchRaw(rawURL, indexerName string) ([]byte, error) {
 	resp, err := c.client.Get(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("newznab request to %s: %w", indexerName, err)
+		return nil, fmt.Errorf("newznab request to %s failed", indexerName)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
 	if err != nil {
 		return nil, fmt.Errorf("read response from %s: %w", indexerName, err)
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		snippet := string(body)
-		if len(snippet) > 200 {
-			snippet = snippet[:200]
-		}
-		return nil, fmt.Errorf("newznab %s HTTP %d: %s", indexerName, resp.StatusCode, snippet)
+	if len(body) > 16<<20 {
+		return nil, fmt.Errorf("newznab response exceeds 16 MiB")
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("newznab %s HTTP %d", indexerName, resp.StatusCode)
+	}
+	var document struct {
+		XMLName xml.Name
+		Code    int `xml:"code,attr"`
+	}
+	if err := xml.Unmarshal(body, &document); err != nil {
+		return nil, fmt.Errorf("invalid XML from %s", indexerName)
+	}
+	if document.XMLName.Local == "error" {
+		return nil, fmt.Errorf("newznab %s API error %d; check API key and request parameters", indexerName, document.Code)
+	}
+
 	return body, nil
 }
 
@@ -158,19 +172,21 @@ func (c *NewznabClient) TestConnection(idx IndexerConfig) error {
 	u := buildURL(idx.URL, map[string]string{
 		"t": "caps", "apikey": idx.APIKey,
 	})
-	resp, err := c.client.Get(u)
+	data, err := c.fetchRaw(u, idx.Name)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", idx.Name, err)
+		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s returned HTTP %d", idx.Name, resp.StatusCode)
+	var caps struct {
+		XMLName xml.Name `xml:"caps"`
+	}
+	if err := xml.Unmarshal(data, &caps); err != nil {
+		return fmt.Errorf("%s did not return Newznab capabilities", idx.Name)
 	}
 	return nil
 }
 
 func (c *NewznabClient) fetch(rawURL, indexerName string) ([]NewznabItem, error) {
-	slog.Debug("newznab query", "indexer", indexerName, "url", rawURL)
+	slog.Debug("newznab query", "indexer", indexerName)
 
 	data, err := c.fetchRaw(rawURL, indexerName)
 	if err != nil {
@@ -179,13 +195,7 @@ func (c *NewznabClient) fetch(rawURL, indexerName string) ([]NewznabItem, error)
 
 	var nzbResp NewznabResponse
 	if err := xml.Unmarshal(data, &nzbResp); err != nil {
-		// Log a snippet of the response body to help diagnose
-		snippet := string(data)
-		if len(snippet) > 300 {
-			snippet = snippet[:300]
-		}
-		slog.Warn("unexpected response from indexer", "indexer", indexerName, "body_preview", snippet)
-		return nil, fmt.Errorf("parse response from %s: %w", indexerName, err)
+		return nil, fmt.Errorf("invalid search response from %s", indexerName)
 	}
 
 	// Extract size and category from newznab attributes
@@ -204,7 +214,7 @@ func (c *NewznabClient) fetch(rawURL, indexerName string) ([]NewznabItem, error)
 			item.Size = item.Enclosure.Length
 		}
 		// Use enclosure URL if link is empty
-		if item.Link == "" && item.Enclosure.URL != "" {
+		if item.Enclosure.URL != "" {
 			item.Link = item.Enclosure.URL
 		}
 	}
@@ -223,12 +233,14 @@ func (c *NewznabClient) SearchMovie(indexers []IndexerConfig, imdbID, title stri
 
 		var items []NewznabItem
 		var err error
+		textSearch := false
 
 		// Try IMDB search first
 		if imdbID != "" {
 			items, err = c.SearchMovieByIMDB(idx, imdbID)
 		}
 		if err != nil || len(items) == 0 {
+			textSearch = true
 			// Fallback to text search
 			query := title
 			if year > 0 {
@@ -242,6 +254,9 @@ func (c *NewznabClient) SearchMovie(indexers []IndexerConfig, imdbID, title stri
 		}
 
 		for _, item := range items {
+			if textSearch && !matchesMovieText(item.Title, title, year) {
+				continue
+			}
 			parsed := ParseReleaseName(item.Title)
 			allReleases = append(allReleases, Release{
 				Title:   item.Title,
@@ -284,6 +299,9 @@ func (c *NewznabClient) SearchEpisode(indexers []IndexerConfig, tvdbID, season, 
 		}
 
 		for _, item := range items {
+			if !MatchesEpisode(item.Title, season, episode) {
+				continue
+			}
 			parsed := ParseReleaseName(item.Title)
 			allReleases = append(allReleases, Release{
 				Title:   item.Title,
@@ -378,6 +396,9 @@ func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []st
 			}
 
 			for _, item := range items {
+				if !MatchesAbsoluteEpisode(item.Title, title, absoluteNum) {
+					continue
+				}
 				parsed := ParseReleaseName(item.Title)
 				allReleases = append(allReleases, Release{
 					Title:   item.Title,
@@ -392,4 +413,44 @@ func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []st
 	}
 
 	return allReleases
+}
+
+var episodeToken = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,3})e(\d{1,4})(?:[^0-9]|$)`)
+
+func MatchesEpisode(name string, season, episode int) bool {
+	m := episodeToken.FindStringSubmatch(name)
+	if m == nil {
+		return false
+	}
+	s, _ := strconv.Atoi(m[1])
+	e, _ := strconv.Atoi(m[2])
+	return s == season && e == episode
+}
+func MatchesAbsoluteEpisode(name, title string, number int) bool {
+	normalized := strings.NewReplacer(".", " ", "_", " ").Replace(strings.ToLower(name))
+	normalizedTitle := strings.NewReplacer(".", " ", "_", " ").Replace(strings.ToLower(title))
+	pos := strings.Index(normalized, normalizedTitle)
+	if pos < 0 {
+		return false
+	}
+	tail := normalized[pos+len(normalizedTitle):]
+	pattern := regexp.MustCompile(fmt.Sprintf(`(?:^|[^0-9a-z])0*%d(?:v\d+)?(?:[^0-9a-z]|$)`, number))
+	return pattern.MatchString(tail)
+}
+
+var titleSeparators = regexp.MustCompile(`[^\pL\pN]+`)
+
+func matchesMovieText(name, title string, year int) bool {
+	normalize := func(s string) string {
+		return strings.TrimSpace(titleSeparators.ReplaceAllString(strings.ToLower(s), " "))
+	}
+	normalized := normalize(name)
+	wanted := normalize(title)
+	if wanted == "" || !strings.Contains(" "+normalized+" ", " "+wanted+" ") {
+		return false
+	}
+	if year > 0 && !regexp.MustCompile(fmt.Sprintf(`(?:^|[^0-9])%d(?:[^0-9]|$)`, year)).MatchString(name) {
+		return false
+	}
+	return true
 }

@@ -26,17 +26,27 @@ func Open(configDir string) (*DB, error) {
 	}
 
 	dbPath := filepath.Join(configDir, "mediaforge.db")
-	sqlDB, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
+	sqlDB, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=on&_busy_timeout=5000&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	if err := sqlDB.Ping(); err != nil {
+		sqlDB.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
+	// Journal mode persists in the database. Setting it in the DSN reruns the
+	// journal-changing pragma on every new pooled connection, which can fail
+	// while another request has an active write transaction.
+	if _, err := sqlDB.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+	sqlDB.SetMaxIdleConns(8)
 
 	db := &DB{sqlDB}
 	if err := db.migrate(); err != nil {
+		sqlDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 

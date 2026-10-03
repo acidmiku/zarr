@@ -12,12 +12,14 @@ async function request(method: string, path: string, body?: any) {
 		const err = await res.json().catch(() => ({ error: res.statusText }));
 		throw new Error(err.error || res.statusText);
 	}
+	if (res.status === 204) return null;
 	return res.json();
 }
 
 export const api = {
 	// Discovery
-	search: (q: string, type: string) => request('GET', `/search?q=${encodeURIComponent(q)}&type=${type}`),
+	search: (q: string, type: string) =>
+		request('GET', `/search?q=${encodeURIComponent(q)}&type=${type}`),
 	trending: (type: string, page = 1) => request('GET', `/trending?type=${type}&page=${page}`),
 	metadata: (tmdbId: number, type: string) => request('GET', `/metadata/${tmdbId}?type=${type}`),
 	anilistMetadata: (id: number) => request('GET', `/metadata/anilist/${id}`),
@@ -78,15 +80,23 @@ export const api = {
 	// Ratings
 	listRatings: (type = 'all', sort = 'rating', order = 'desc') =>
 		request('GET', `/ratings?type=${type}&sort=${sort}&order=${order}`),
-	getRating: (tmdbId: number, type: string) =>
-		request('GET', `/ratings/${tmdbId}?type=${type}`),
-	upsertRating: (data: { tmdb_id: number; media_type: string; rating: number; comment: string; title?: string; poster_url?: string; year?: number; anime?: boolean }) =>
-		request('PUT', '/ratings', data),
+	getRating: (tmdbId: number, type: string) => request('GET', `/ratings/${tmdbId}?type=${type}`),
+	upsertRating: (data: {
+		tmdb_id: number;
+		media_type: string;
+		rating: number;
+		comment: string;
+		title?: string;
+		poster_url?: string;
+		year?: number;
+		anime?: boolean;
+	}) => request('PUT', '/ratings', data),
 	deleteRating: (tmdbId: number, type: string) =>
 		request('DELETE', `/ratings/${tmdbId}?type=${type}`),
 
 	// Music
-	musicSearch: (q: string, type = 'album') => request('GET', `/music/search?q=${encodeURIComponent(q)}&type=${type}`),
+	musicSearch: (q: string, type = 'album') =>
+		request('GET', `/music/search?q=${encodeURIComponent(q)}&type=${type}`),
 	musicTrending: (page = 1) => request('GET', `/music/trending?page=${page}`),
 	musicArtist: (mbid: string) => request('GET', `/music/artist/${mbid}`),
 	musicAlbum: (rgid: string) => request('GET', `/music/album/${rgid}`),
@@ -110,6 +120,17 @@ export const api = {
 	// Settings
 	getSettings: () => request('GET', '/settings'),
 	updateSettings: (data: any) => request('PUT', '/settings', data),
+	getSetupStatus: () => request('GET', '/setup/status'),
+	testTMDB: (data: any = {}) => request('POST', '/settings/test-tmdb', data),
+	testSABnzbd: (data: any = {}) => request('POST', '/settings/test-sabnzbd', data),
+	getUsenetServers: () => request('GET', '/usenet/servers'),
+	createUsenetServer: (data: any) => request('POST', '/usenet/servers', data),
+	updateUsenetServer: (id: string, data: any) =>
+		request('PUT', `/usenet/servers/${encodeURIComponent(id)}`, data),
+	deleteUsenetServer: (id: string) =>
+		request('DELETE', `/usenet/servers/${encodeURIComponent(id)}`),
+	testUsenetServer: (id: string) =>
+		request('POST', `/usenet/servers/${encodeURIComponent(id)}/test`),
 	testQBittorrent: (data?: { url?: string; username?: string; password?: string }) =>
 		request('POST', '/settings/test-qbittorrent', data || {}),
 
@@ -128,17 +149,19 @@ export const api = {
 	aiGetSession: (id: number) => request('GET', `/ai/sessions/${id}`),
 	aiDeleteSession: (id: number) => request('DELETE', `/ai/sessions/${id}`),
 	aiModels: () => request('GET', '/ai/models'),
-	testOpenRouter: (key?: string) => request('POST', '/settings/test-openrouter', key ? { key } : {}),
+	testOpenRouter: (data: any = {}) => request('POST', '/settings/test-openrouter', data),
 
 	// AI streaming (returns raw Response for SSE parsing)
-	aiChat: (sessionId: number, content: string) =>
+	aiChat: (sessionId: number, content: string, signal?: AbortSignal) =>
 		fetch(`${BASE}/ai/sessions/${sessionId}/messages`, {
+			signal,
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ content })
 		}),
-	aiRecommend: (sessionId: number) =>
+	aiRecommend: (sessionId: number, signal?: AbortSignal) =>
 		fetch(`${BASE}/ai/sessions/${sessionId}/recommend`, {
+			signal,
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' }
 		})

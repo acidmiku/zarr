@@ -1,7 +1,9 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -74,6 +76,10 @@ func (s *Server) handleDeleteAISession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid session ID")
 		return
 	}
+	if !s.beginAITurn(w, id) {
+		return
+	}
+	defer s.aiSession.EndTurn(id)
 	if err := s.aiSession.DeleteSession(id); err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -83,7 +89,7 @@ func (s *Server) handleDeleteAISession(w http.ResponseWriter, r *http.Request) {
 
 // handleAIChat handles the streaming chat endpoint.
 func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
-	if s.aiOpenRouter == nil {
+	if s.aiOpenRouter == nil || s.aiSession == nil {
 		writeError(w, 400, "OpenRouter API key not configured. Go to Settings to add it.")
 		return
 	}
@@ -97,13 +103,23 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Content string `json:"content"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Content == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
 		writeError(w, 400, "content is required")
 		return
 	}
 
-	// Save user message
-	s.aiSession.SaveMessage(id, "user", req.Content, "", "")
+	if !s.beginAITurn(w, id) {
+		return
+	}
+	defer s.aiSession.EndTurn(id)
+	if len(req.Content) > 32000 {
+		writeError(w, 400, "message is too long (maximum 32000 bytes)")
+		return
+	}
+	if _, err := s.aiSession.SaveMessage(id, "user", req.Content, "", ""); err != nil {
+		writeError(w, 500, "failed to save message")
+		return
+	}
 
 	// Stream the response
 	s.streamAIResponse(w, r, id)
@@ -111,7 +127,7 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 
 // handleAIRecommend triggers initial recommendations based on ratings.
 func (s *Server) handleAIRecommend(w http.ResponseWriter, r *http.Request) {
-	if s.aiOpenRouter == nil {
+	if s.aiOpenRouter == nil || s.aiSession == nil {
 		writeError(w, 400, "OpenRouter API key not configured. Go to Settings to add it.")
 		return
 	}
@@ -122,17 +138,40 @@ func (s *Server) handleAIRecommend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build ratings message
+	if !s.beginAITurn(w, id) {
+		return
+	}
+	defer s.aiSession.EndTurn(id)
 	ratingsText := s.buildRatingsMessage()
-	s.aiSession.SaveMessage(id, "user", ratingsText, "", "")
+	if _, err := s.aiSession.SaveMessage(id, "user", ratingsText, "", ""); err != nil {
+		writeError(w, 500, "failed to save message")
+		return
+	}
 
 	// Stream the response
 	s.streamAIResponse(w, r, id)
 }
 
+func (s *Server) beginAITurn(w http.ResponseWriter, id int) bool {
+	if !s.aiSession.BeginTurn(id) {
+		writeError(w, 409, "this conversation is already responding")
+		return false
+	}
+	if _, _, err := s.aiSession.GetSession(id); err != nil {
+		s.aiSession.EndTurn(id)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, 404, "session not found")
+		} else {
+			writeError(w, 500, "failed to load session")
+		}
+		return false
+	}
+	return true
+}
+
 func (s *Server) buildRatingsMessage() string {
 	rows, err := s.db.Query(`SELECT r.media_type, r.rating, r.comment,
-		COALESCE(m.title, 'Unknown Title') as title
+		COALESCE(NULLIF(r.title, ''), m.title, 'Unknown Title') as title
 		FROM user_ratings r
 		LEFT JOIN media_items m ON m.tmdb_id = r.tmdb_id AND m.type = r.media_type
 		ORDER BY r.rating DESC`)
@@ -148,7 +187,12 @@ func (s *Server) buildRatingsMessage() string {
 		var mediaType, title string
 		var rating int
 		var comment *string
-		rows.Scan(&mediaType, &rating, &comment, &title)
+		if err := rows.Scan(&mediaType, &rating, &comment, &title); err != nil {
+			continue
+		}
+		if rating < 1 || rating > 5 {
+			continue
+		}
 		stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
 		commentStr := ""
 		if comment != nil && *comment != "" {
@@ -169,7 +213,12 @@ func (s *Server) buildRatingsMessage() string {
 			var title, artistName string
 			var rating int
 			var comment *string
-			musicRows.Scan(&title, &artistName, &rating, &comment)
+			if err := musicRows.Scan(&title, &artistName, &rating, &comment); err != nil {
+				continue
+			}
+			if rating < 1 || rating > 5 {
+				continue
+			}
 			stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
 			commentStr := ""
 			if comment != nil && *comment != "" {
@@ -211,7 +260,11 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 	// Get AI settings
 	modelID, _ := s.db.GetSetting("openrouter_model")
 	if modelID == "" {
-		modelID = "anthropic/claude-sonnet-4-20250514"
+		modelID = "moonshotai/kimi-k3"
+	}
+	effort, _ := s.db.GetSetting("openrouter_reasoning_effort")
+	if effort == "" {
+		effort = "high"
 	}
 	preset, _ := s.db.GetSetting("ai_personality_preset")
 	custom, _ := s.db.GetSetting("ai_personality_custom")
@@ -230,9 +283,12 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 	}
 
 	// Tool call loop
-	for iteration := 0; iteration < 5; iteration++ {
+	for iteration := 0; iteration < 6; iteration++ {
+		if r.Context().Err() != nil {
+			return
+		}
 		// Build context for this iteration
-		messages, err := s.aiSession.BuildContext(sessionID, systemPrompt, modelID)
+		messages, err := s.aiSession.BuildContextContext(r.Context(), sessionID, systemPrompt, modelID)
 		if err != nil {
 			sendEvent("error", map[string]string{"message": "Failed to build context: " + err.Error()})
 			sendEvent("done", map[string]interface{}{})
@@ -240,24 +296,24 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 		}
 
 		chatReq := ai.ChatRequest{
-			Model:    modelID,
-			Messages: messages,
-			Tools:    ai.ToolDefs(braveAvailable),
+			Model:     modelID,
+			Messages:  messages,
+			Tools:     ai.ToolDefs(braveAvailable),
+			Reasoning: &ai.ReasoningConfig{Effort: effort},
+			MaxTokens: 16384,
 		}
 
-		var fullContent strings.Builder
-		var toolCalls []ai.ToolCall
-		var finishReason string
+		// Reserve the last iteration for a final answer instead of ending on tools.
+		if iteration == 5 {
+			chatReq.Tools = nil
+		}
 
-		msg, err := s.aiOpenRouter.ChatStream(chatReq, func(evt ai.StreamEvent) {
+		msg, err := s.aiOpenRouter.ChatStreamContext(r.Context(), chatReq, func(evt ai.StreamEvent) {
 			switch evt.Type {
 			case "text":
-				fullContent.WriteString(evt.Content)
 				sendEvent("text", map[string]string{"content": evt.Content})
-			case "tool_calls":
-				toolCalls = evt.ToolCalls
-			case "done":
-				finishReason = evt.FinishReason
+			case "reasoning":
+				sendEvent("reasoning", map[string]string{"content": evt.Content})
 			}
 		})
 
@@ -268,18 +324,18 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 
-		_ = finishReason
-
-		if len(toolCalls) > 0 {
-			// Save assistant message with tool calls
-			tcJSON, _ := json.Marshal(msg.ToolCalls)
-			s.aiSession.SaveMessage(sessionID, "assistant", fullContent.String(), string(tcJSON), "")
+		if len(msg.ToolCalls) > 0 {
+			turnMessages := []ai.Message{*msg}
 
 			// Execute each tool call
-			for _, tc := range toolCalls {
+			for _, tc := range msg.ToolCalls {
 				sendEvent("tool_call_start", map[string]string{"tool": tc.Function.Name})
 
-				result, recs, _ := executor.ExecuteTool(tc.Function.Name, tc.Function.Arguments)
+				result, recs, toolErr := executor.ExecuteTool(tc.Function.Name, tc.Function.Arguments)
+				if toolErr != nil {
+					payload, _ := json.Marshal(map[string]string{"error": toolErr.Error()})
+					result = string(payload)
+				}
 
 				sendEvent("tool_call_end", map[string]string{
 					"tool":           tc.Function.Name,
@@ -292,9 +348,14 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 				}
 
 				// Save tool result as a message
-				s.aiSession.SaveMessage(sessionID, "tool", result, "", tc.ID)
+				turnMessages = append(turnMessages, ai.Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 			}
 
+			if _, err := s.aiSession.SaveMessages(sessionID, turnMessages); err != nil {
+				sendEvent("error", map[string]string{"message": "Failed to save AI response"})
+				sendEvent("done", map[string]interface{}{})
+				return
+			}
 			// Signal frontend to start a new message bubble for continuation
 			sendEvent("new_message", map[string]interface{}{})
 
@@ -303,10 +364,15 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 		}
 
 		// No tool calls — save the final assistant message and break
-		s.aiSession.SaveMessage(sessionID, "assistant", fullContent.String(), "", "")
+		if _, err := s.aiSession.SaveMessages(sessionID, []ai.Message{*msg}); err != nil {
+			sendEvent("error", map[string]string{"message": "Failed to save AI response"})
+			sendEvent("done", map[string]interface{}{})
+			return
+		}
 
 		// Generate title in background
-		go s.aiSession.MaybeGenerateTitle(sessionID, modelID)
+		sessionManager := s.aiSession
+		go sessionManager.MaybeGenerateTitle(sessionID, modelID)
 
 		break
 	}
@@ -316,11 +382,11 @@ func (s *Server) streamAIResponse(w http.ResponseWriter, r *http.Request, sessio
 
 // handleAIModels returns available OpenRouter models.
 func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
-	if s.aiOpenRouter == nil {
+	if s.aiOpenRouter == nil || s.aiSession == nil {
 		writeError(w, 400, "OpenRouter API key not configured.")
 		return
 	}
-	models, err := s.aiOpenRouter.GetModels()
+	models, err := s.aiOpenRouter.GetModelsContext(r.Context())
 	if err != nil {
 		writeError(w, 500, "Failed to fetch models: "+err.Error())
 		return

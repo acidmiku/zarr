@@ -9,7 +9,7 @@
 
 	let selectedProfile = (() => {
 		const match = profiles.find(p => p.profile_type === 'music');
-		return match?.id || profiles[0]?.id || 1;
+		return match?.id || 0;
 	})();
 	let adding = false;
 	let albumDetail = null;
@@ -17,7 +17,7 @@
 
 	onMount(async () => {
 		// If we have a MusicBrainz ID, fetch track details
-		const rgid = item?.id || item?.mbid;
+		const rgid = item?.release_group_id || item?.id || item?.mbid;
 		if (rgid) {
 			loadingDetail = true;
 			try {
@@ -43,9 +43,10 @@
 	) || [];
 
 	async function addToLibrary() {
+		if (adding) return;
 		adding = true;
 		try {
-			const rgid = item?.id || item?.mbid;
+			const rgid = item?.release_group_id || item?.id || item?.mbid;
 			const payload = {
 				release_group_id: rgid,
 				artist_mbid: item?.artist_id || item?.artist_mbid || '',

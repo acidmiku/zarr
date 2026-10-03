@@ -120,7 +120,10 @@ var invalidChars = regexp.MustCompile(`[<>:"/\\|?*]`)
 
 func SanitizeFilename(name string) string {
 	clean := invalidChars.ReplaceAllString(name, "")
-	clean = strings.TrimSpace(clean)
+	clean = strings.Trim(clean, " .\t\r\n")
+	if clean == "" {
+		clean = "Untitled"
+	}
 	// Collapse multiple spaces
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 	return clean

@@ -37,7 +37,19 @@ func wrapRetry(base http.RoundTripper) http.RoundTripper {
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	canReplay := req.Body == nil || req.GetBody != nil
+	// Retrying a POST can enqueue the same download or charge an AI request twice.
+	canReplay := (req.Method == http.MethodGet || req.Method == http.MethodHead || req.Method == http.MethodOptions) && (req.Body == nil || req.GetBody != nil)
+	// SABnzbd exposes mutations as GET; only retry its read operations.
+	if mode := req.URL.Query().Get("mode"); mode != "" {
+		switch mode {
+		case "version", "get_config", "queue", "history":
+			if req.URL.Query().Get("name") != "" {
+				canReplay = false
+			}
+		default:
+			canReplay = false
+		}
+	}
 	attempts := t.attempts
 	if !canReplay {
 		attempts = 1
@@ -76,7 +88,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			if i < attempts-1 {
 				slog.Debug("http retry: transport error",
-					"url", req.URL.String(), "attempt", i+1, "error", err)
+					"host", req.URL.Hostname(), "attempt", i+1)
 				continue
 			}
 			return nil, err
@@ -87,7 +99,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			slog.Debug("http retry: status",
-				"url", req.URL.String(), "status", resp.StatusCode, "attempt", i+1)
+				"host", req.URL.Hostname(), "status", resp.StatusCode, "attempt", i+1)
 			continue
 		}
 
@@ -100,10 +112,10 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 func retryableStatus(s int) bool {
 	switch s {
 	case http.StatusRequestTimeout, // 408
-		http.StatusTooManyRequests,     // 429
-		http.StatusBadGateway,          // 502
-		http.StatusServiceUnavailable,  // 503
-		http.StatusGatewayTimeout:      // 504
+		http.StatusTooManyRequests,    // 429
+		http.StatusBadGateway,         // 502
+		http.StatusServiceUnavailable, // 503
+		http.StatusGatewayTimeout:     // 504
 		return true
 	}
 	return false

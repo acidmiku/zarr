@@ -26,7 +26,6 @@ data/
 *.db-wal
 
 # Go
-go.sum
 vendor/
 
 # IDE

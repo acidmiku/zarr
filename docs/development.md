@@ -1,30 +1,28 @@
 # Development
 
-## Building from Source
+## Build and verify
 
-```bash
-# Install dependencies
-cd ui && npm install && cd ..
+Use Go 1.24+ with CGO and a C compiler, and Node.js 22.12+.
 
-# Build frontend
-cd ui && npm run build && cd ..
-
-# Build Go binary
-go build -o mediaforge ./cmd/mediaforge
-
-# Run locally
-./mediaforge
+```sh
+go test -race ./...
+go vet ./...
+cd ui
+npm ci
+npx playwright install chromium
+npm run test:ui
+npm audit --audit-level=moderate
 ```
 
-## Development Mode
+The browser suite uses a production build with API fixtures; it does not require real provider credentials. Go tests create isolated temporary databases/files and mock external services. CI runs both suites on Linux.
 
-```bash
-# Terminal 1: Frontend dev server
-cd ui && npm run dev
+For a complete runnable build, use `docker compose up -d --build`; its build embeds the Svelte output in the Go binary. If building manually, copy `ui/build/*` into `internal/server/static/` before `go build ./cmd/mediaforge`.
 
-# Terminal 2: Backend with API proxy
-go run ./cmd/mediaforge
-```
+## Development mode
+
+Run the backend with a private development config directory and an absolute media root. Environment seeds are used only for settings not already present in that database. Run `npm run dev` in `ui` for the frontend; Vite proxies `/api` to localhost:9876. Use the same browser origin for the page and API: arbitrary cross-origin browser requests are rejected.
+
+The Windows build includes native disk-space support. On Windows, install a compatible C compiler for SQLite/CGO or use the Docker build.
 
 ## Project Structure
 

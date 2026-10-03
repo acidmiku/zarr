@@ -1,15 +1,17 @@
 package server
 
 import (
+	"context"
+	"mediaforge/internal/qbt"
+	"mediaforge/internal/sabnzbd"
 	"net/http"
-	"os"
 	"runtime"
-	"syscall"
+	"time"
 )
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
-		"version":  "0.1.0",
+		"version":  "0.3.0",
 		"platform": runtime.GOOS + "/" + runtime.GOARCH,
 		"go":       runtime.Version(),
 	}
@@ -21,11 +23,40 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		status["database"] = "ok"
 	}
 
-	// SABnzbd status
-	if err := s.grabber.TestConnection(); err != nil {
-		status["sabnzbd"] = "unreachable"
-	} else {
-		status["sabnzbd"] = "connected"
+	// Unconfigured services do not delay the first-run UI. Configured clients
+	// are checked concurrently with a short bound, independently of queue polling.
+	type serviceStatus struct{ name, state string }
+	checks := make(chan serviceStatus, 2)
+	count := 0
+	status["sabnzbd"] = "not_configured"
+	status["qbittorrent"] = "disabled"
+	if s.cfg.SABnzbdKey != "" {
+		count++
+		go func() {
+			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			defer cancel()
+			state := "connected"
+			if sabnzbd.New(s.directClient, s.cfg.SABnzbdURL, s.cfg.SABnzbdKey).Test(ctx) != nil {
+				state = "unreachable"
+			}
+			checks <- serviceStatus{"sabnzbd", state}
+		}()
+	}
+	if s.cfg.QBTEnabled {
+		count++
+		go func() {
+			client := *s.directClient
+			client.Timeout = 3 * time.Second
+			state := "connected"
+			if qbt.New(&client, s.cfg.QBTURL, s.cfg.QBTUsername, s.cfg.QBTPassword).TestConnection() != nil {
+				state = "unreachable"
+			}
+			checks <- serviceStatus{"qbittorrent", state}
+		}()
+	}
+	for i := 0; i < count; i++ {
+		result := <-checks
+		status[result.name] = result.state
 	}
 
 	// Setup status
@@ -87,22 +118,4 @@ type diskSpace struct {
 	Total     uint64 `json:"total_gb"`
 	Free      uint64 `json:"free_gb"`
 	Available uint64 `json:"available_gb"`
-}
-
-func getDiskSpace(path string) diskSpace {
-	if path == "" {
-		return diskSpace{}
-	}
-	os.MkdirAll(path, 0755)
-
-	ds := diskSpace{}
-
-	var stat syscall.Statfs_t
-	if syscall.Statfs(path, &stat) == nil {
-		ds.Total = stat.Blocks * uint64(stat.Bsize) / (1024 * 1024 * 1024)
-		ds.Free = stat.Bfree * uint64(stat.Bsize) / (1024 * 1024 * 1024)
-		ds.Available = stat.Bavail * uint64(stat.Bsize) / (1024 * 1024 * 1024)
-	}
-
-	return ds
 }

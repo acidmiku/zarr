@@ -29,10 +29,13 @@ var qualityPatterns = []struct {
 }
 
 // For anime releases that just say 1080p without a source, assume web.
-var fallbackResolution = map[string]*regexp.Regexp{
-	"web-1080p": regexp.MustCompile(`(?i)\b1080p\b`),
-	"web-720p":  regexp.MustCompile(`(?i)\b720p\b`),
-	"web-2160p": regexp.MustCompile(`(?i)\b2160p\b`),
+var fallbackResolution = []struct {
+	Quality string
+	Pattern *regexp.Regexp
+}{
+	{"web-2160p", regexp.MustCompile(`(?i)\b2160p\b`)},
+	{"web-1080p", regexp.MustCompile(`(?i)\b1080p\b`)},
+	{"web-720p", regexp.MustCompile(`(?i)\b720p\b`)},
 }
 
 // Tag detection patterns.
@@ -50,13 +53,13 @@ var tagPatterns = []struct {
 
 // Language detection patterns.
 var langPatterns = struct {
-	DualAudio  *regexp.Regexp
-	Multi      *regexp.Regexp
-	Japanese   *regexp.Regexp
-	English    *regexp.Regexp
-	EngSub     *regexp.Regexp
-	Dubbed     *regexp.Regexp
-	Raw        *regexp.Regexp
+	DualAudio *regexp.Regexp
+	Multi     *regexp.Regexp
+	Japanese  *regexp.Regexp
+	English   *regexp.Regexp
+	EngSub    *regexp.Regexp
+	Dubbed    *regexp.Regexp
+	Raw       *regexp.Regexp
 }{
 	DualAudio: regexp.MustCompile(`(?i)\bDual.?Audio\b`),
 	Multi:     regexp.MustCompile(`(?i)\bMulti\b`),
@@ -84,9 +87,9 @@ func ParseReleaseName(name string) ParsedRelease {
 
 	// Fallback: if no specific source+resolution matched, check resolution alone
 	if result.Quality == "" {
-		for quality, pattern := range fallbackResolution {
-			if pattern.MatchString(name) {
-				result.Quality = quality
+		for _, fallback := range fallbackResolution {
+			if fallback.Pattern.MatchString(name) {
+				result.Quality = fallback.Quality
 				break
 			}
 		}

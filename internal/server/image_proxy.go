@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,9 +34,9 @@ type imageCache struct {
 	inflightMu sync.Mutex
 	inflight   map[string]*inflightEntry
 
-	negMu     sync.Mutex
-	negCache  map[string]time.Time
-	negTTL    time.Duration
+	negMu    sync.Mutex
+	negCache map[string]time.Time
+	negTTL   time.Duration
 }
 
 type inflightEntry struct {
@@ -193,7 +193,14 @@ func (c *imageCache) doFetch(ctx context.Context, client *http.Client, url strin
 		entry.err = err
 		return
 	}
-	resp, err := client.Do(req)
+	imageClient := *client
+	imageClient.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || !allowedImageURL(r.URL.String()) {
+			return fmt.Errorf("image redirect is not allowed")
+		}
+		return nil
+	}
+	resp, err := imageClient.Do(req)
 	if err != nil {
 		entry.status = http.StatusBadGateway
 		entry.err = err
@@ -202,7 +209,11 @@ func (c *imageCache) doFetch(ctx context.Context, client *http.Client, url strin
 	}
 	defer resp.Body.Close()
 
-	body, readErr := io.ReadAll(resp.Body)
+	const maxImageBytes = 15 << 20
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	if len(body) > maxImageBytes {
+		readErr = fmt.Errorf("image exceeds size limit")
+	}
 	if readErr != nil {
 		entry.status = http.StatusBadGateway
 		entry.err = readErr
@@ -214,11 +225,11 @@ func (c *imageCache) doFetch(ctx context.Context, client *http.Client, url strin
 	ct := resp.Header.Get("Content-Type")
 
 	if status == http.StatusOK {
-		if ct == "" {
-			ct = mime.TypeByExtension(filepath.Ext(url))
-			if ct == "" {
-				ct = "image/jpeg"
-			}
+		ct = http.DetectContentType(body)
+		if ct != "image/jpeg" && ct != "image/png" && ct != "image/gif" && ct != "image/webp" {
+			entry.status = http.StatusBadGateway
+			entry.err = fmt.Errorf("upstream response is not a supported image")
+			return
 		}
 		if err := c.put(url, body, ct); err != nil {
 			slog.Warn("image cache write failed", "url", url, "error", err)
@@ -254,6 +265,20 @@ var allowedImagePrefixes = []string{
 	"https://lastfm-img2.akamaized.net/",
 }
 
+func allowedImageURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return false
+	}
+	for _, prefix := range allowedImagePrefixes {
+		if strings.HasPrefix(raw, prefix) {
+			return true
+		}
+	}
+	// Cover Art Archive redirects image downloads to Internet Archive storage.
+	return strings.HasSuffix(u.Hostname(), ".archive.org")
+}
+
 // handleImageProxy proxies external images through the backend to avoid CORS issues,
 // routes through the configured proxy, and caches on disk to avoid hammering upstream APIs.
 func (s *Server) handleImageProxy(w http.ResponseWriter, r *http.Request) {
@@ -263,14 +288,7 @@ func (s *Server) handleImageProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := false
-	for _, prefix := range allowedImagePrefixes {
-		if strings.HasPrefix(imageURL, prefix) {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
+	if !allowedImageURL(imageURL) {
 		writeError(w, 403, "URL not allowed")
 		return
 	}

@@ -5,9 +5,16 @@ import (
 	"mediaforge/internal/database"
 	"os"
 	"strconv"
+	"sync"
 )
 
 type Config struct {
+	mu sync.RWMutex
+	Values
+}
+
+// Values is a consistent snapshot of runtime settings, safe to pass to workers.
+type Values struct {
 	ConfigDir              string
 	MediaRoot              string
 	TMDBApiKey             string
@@ -19,7 +26,7 @@ type Config struct {
 	LastFMApiKey           string
 	QBTEnabled             bool
 	QBTURL                 string
-	QBTUsername             string
+	QBTUsername            string
 	QBTPassword            string
 	TorrentSeedHours       int
 	TorrentRemoveAfterSeed bool
@@ -43,19 +50,20 @@ func Load(db *database.DB) *Config {
 	// Seed settings from env vars if not already set
 	for envKey, dbKey := range envMapping {
 		if val := os.Getenv(envKey); val != "" {
-			existing, _ := db.GetSetting(dbKey)
-			if existing == "" {
+			var exists int
+			db.QueryRow(`SELECT COUNT(*) FROM settings WHERE key=?`, dbKey).Scan(&exists)
+			if exists == 0 {
 				slog.Info("seeding setting from env", "key", dbKey)
 				db.SetSetting(dbKey, val)
 			}
 		}
 	}
 
-	cfg := &Config{
+	cfg := &Config{Values: Values{
 		ConfigDir: getEnvDefault("MEDIAFORGE_CONFIG_DIR", "/config"),
 		Port:      getEnvDefault("MEDIAFORGE_PORT", "9876"),
 		LogLevel:  getEnvDefault("MEDIAFORGE_LOG_LEVEL", "info"),
-	}
+	}}
 
 	cfg.TMDBApiKey, _ = db.GetSetting("tmdb_api_key")
 	cfg.Proxy, _ = db.GetSetting("proxy")
@@ -75,7 +83,7 @@ func Load(db *database.DB) *Config {
 	cfg.QBTEnabled = qbtEnabled == "true"
 	cfg.QBTURL, _ = db.GetSetting("qbittorrent_url")
 	if cfg.QBTURL == "" {
-		cfg.QBTURL = "http://qbittorrent:8080"
+		cfg.QBTURL = "http://qbittorrent:9090"
 	}
 	cfg.QBTUsername, _ = db.GetSetting("qbittorrent_username")
 	if cfg.QBTUsername == "" {
@@ -96,6 +104,8 @@ func Load(db *database.DB) *Config {
 
 // Reload re-reads settings from the database.
 func (c *Config) Reload(db *database.DB) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.TMDBApiKey, _ = db.GetSetting("tmdb_api_key")
 	c.Proxy, _ = db.GetSetting("proxy")
 	c.MediaRoot, _ = db.GetSetting("media_root")
@@ -103,6 +113,9 @@ func (c *Config) Reload(db *database.DB) {
 		c.MediaRoot = "/data/media"
 	}
 	c.SABnzbdURL, _ = db.GetSetting("sabnzbd_url")
+	if c.SABnzbdURL == "" {
+		c.SABnzbdURL = "http://sabnzbd:8080"
+	}
 	c.SABnzbdKey, _ = db.GetSetting("sabnzbd_api_key")
 	c.LastFMApiKey, _ = db.GetSetting("lastfm_api_key")
 
@@ -111,7 +124,7 @@ func (c *Config) Reload(db *database.DB) {
 	c.QBTEnabled = qbtEnabled == "true"
 	c.QBTURL, _ = db.GetSetting("qbittorrent_url")
 	if c.QBTURL == "" {
-		c.QBTURL = "http://qbittorrent:8080"
+		c.QBTURL = "http://qbittorrent:9090"
 	}
 	c.QBTUsername, _ = db.GetSetting("qbittorrent_username")
 	if c.QBTUsername == "" {
@@ -126,6 +139,12 @@ func (c *Config) Reload(db *database.DB) {
 	}
 	removeAfter, _ := db.GetSetting("torrent_remove_after_seed")
 	c.TorrentRemoveAfterSeed = removeAfter != "false"
+}
+
+func (c *Config) Snapshot() Values {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Values
 }
 
 func getEnvDefault(key, def string) string {

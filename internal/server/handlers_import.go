@@ -123,7 +123,7 @@ func (s *Server) scanMovies(dir string) []scanResultItem {
 		} else if postprocess.IsVideoFile(entry.Name()) {
 			title, year := parseMovieDirName(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())), titleYearRe)
 			item := scanResultItem{
-				SourcePath: dir,
+				SourcePath: entryPath,
 				Files:      []string{entryPath},
 				Title:      title,
 				Year:       year,
@@ -458,6 +458,16 @@ func (s *Server) handleImportExecute(w http.ResponseWriter, r *http.Request) {
 		var res importResult
 		res.SourcePath = item.SourcePath
 
+		profileType := "video"
+		if item.Type == "music" {
+			profileType = "music"
+		}
+		profileID, err := s.resolveProfile(item.QualityProfileID, profileType)
+		if err != nil {
+			results = append(results, importResult{SourcePath: item.SourcePath, Status: "error", Message: err.Error()})
+			continue
+		}
+		item.QualityProfileID = profileID
 		switch item.Type {
 		case "movie":
 			res = s.importMovie(item)
@@ -528,18 +538,18 @@ func (s *Server) importMovie(item importItem) importResult {
 	ext := filepath.Ext(srcFile)
 	destPath := postprocess.MoviePath(s.cfg.MediaRoot, movie.Title, year, ext)
 
-	// Move file
-	if err := moveFileForImport(srcFile, destPath); err != nil {
-		res.Status = "error"
-		res.Message = "move failed: " + err.Error()
-		return res
-	}
-
 	// Create library entry
 	genres := genreNames(movie.Genres)
 	genresJSON, _ := json.Marshal(genres)
 
-	result, err := s.db.Exec(`INSERT INTO media_items
+	tx, err := s.db.Begin()
+	if err != nil {
+		res.Status = "error"
+		res.Message = err.Error()
+		return res
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO media_items
 		(type, title, year, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path, status)
 		VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?, 'available')`,
 		movie.Title, year, movie.ID, movie.IMDbID,
@@ -557,10 +567,28 @@ func (s *Server) importMovie(item importItem) importResult {
 		return res
 	}
 
+	if err := validateImportDestination(s.cfg.MediaRoot, destPath); err != nil {
+		res.Status = "error"
+		res.Message = err.Error()
+		return res
+	}
+	if err := moveFileForImport(srcFile, destPath); err != nil {
+		res.Status = "error"
+		res.Message = "move failed: " + err.Error()
+		return res
+	}
 	id, _ := result.LastInsertId()
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'imported', ?)`,
+	tx.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'imported', ?)`,
 		id, fmt.Sprintf("Imported %s (%d)", movie.Title, year))
 
+	if err := tx.Commit(); err != nil {
+		// Restore the original file when database commit fails, preserving it even
+		// when restoration itself is blocked by a newly created source file.
+		restoreErr := moveFileForImport(destPath, srcFile)
+		res.Status = "error"
+		res.Message = fmt.Sprintf("database commit failed: %v (restore: %v)", err, restoreErr)
+		return res
+	}
 	res.Status = "imported"
 	res.LibraryID = int(id)
 	res.Message = fmt.Sprintf("Imported %s (%d)", movie.Title, year)
@@ -642,11 +670,31 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 	if res.LibraryID > 0 {
 		mediaID = int64(res.LibraryID)
 	} else {
+		details := make(map[int]*metadata.TMDBSeasonDetail)
+		for _, season := range tv.Seasons {
+			if season.SeasonNumber == 0 && !isAnime {
+				continue
+			}
+			detail, err := s.tmdb.GetSeason(tv.ID, season.SeasonNumber)
+			if err != nil {
+				res.Status = "error"
+				res.Message = "failed to fetch season metadata: " + err.Error()
+				return res
+			}
+			details[season.SeasonNumber] = detail
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			res.Status = "error"
+			res.Message = err.Error()
+			return res
+		}
+		defer tx.Rollback()
 		// Create library entry
 		genres := genreNames(tv.Genres)
 		genresJSON, _ := json.Marshal(genres)
 
-		result, err := s.db.Exec(`INSERT INTO media_items
+		result, err := tx.Exec(`INSERT INTO media_items
 			(type, title, year, anime, tmdb_id, imdb_id, tvdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, status)
 			VALUES ('series', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, 'wanted')`,
 			tv.Name, year, isAnime, tv.ID,
@@ -666,37 +714,19 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 
 		mediaID, _ = result.LastInsertId()
 
-		// Create seasons and episodes from TMDB
 		for _, season := range tv.Seasons {
-			if season.SeasonNumber == 0 && !isAnime {
-				continue
-			}
-
-			s.db.Exec(`INSERT INTO seasons (media_item_id, number, title, overview, poster_url)
-				VALUES (?, ?, ?, ?, ?)`,
-				mediaID, season.SeasonNumber, season.Name, season.Overview,
-				metadata.PosterURL(season.PosterPath))
-
-			var seasonID int64
-			s.db.QueryRow(`SELECT id FROM seasons WHERE media_item_id = ? AND number = ?`,
-				mediaID, season.SeasonNumber).Scan(&seasonID)
-
-			seasonDetail, err := s.tmdb.GetSeason(tv.ID, season.SeasonNumber)
-			if err != nil {
-				continue
-			}
-
-			for _, ep := range seasonDetail.Episodes {
-				epType := "standard"
-				if season.SeasonNumber == 0 {
-					epType = "special"
+			if detail := details[season.SeasonNumber]; detail != nil {
+				if err := insertSeason(tx, mediaID, season, detail); err != nil {
+					res.Status = "error"
+					res.Message = "failed to save season: " + err.Error()
+					return res
 				}
-				s.db.Exec(`INSERT INTO episodes
-					(season_id, media_item_id, number, episode_type, title, overview, air_date)
-					VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					seasonID, mediaID, ep.EpisodeNumber, epType,
-					ep.Name, ep.Overview, ep.AirDate)
 			}
+		}
+		if err := tx.Commit(); err != nil {
+			res.Status = "error"
+			res.Message = "failed to save series"
+			return res
 		}
 	}
 
@@ -739,12 +769,19 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 			destPath = postprocess.SeriesEpisodePath(s.cfg.MediaRoot, tv.Name, year, ep.season, ep.episode, epTitleStr, ext)
 		}
 
+		if err := validateImportDestination(s.cfg.MediaRoot, destPath); err != nil {
+			slog.Warn("unsafe import destination", "error", err)
+			continue
+		}
 		if err := moveFileForImport(ep.file, destPath); err != nil {
 			slog.Warn("import episode move failed", "file", ep.file, "error", err)
 			continue
 		}
 
-		s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, destPath, epID)
+		if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, destPath, epID); err != nil {
+			moveFileForImport(destPath, ep.file)
+			continue
+		}
 		importedCount++
 	}
 
@@ -763,6 +800,9 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 		mediaID, fmt.Sprintf("Imported %d episodes for %s", importedCount, tv.Name))
 
 	res.Status = "imported"
+	if importedCount == 0 {
+		res.Status = "error"
+	}
 	res.LibraryID = int(mediaID)
 	res.Message = fmt.Sprintf("Imported %d/%d episodes for %s", importedCount, len(episodes), tv.Name)
 	slog.Info("imported series", "title", tv.Name, "episodes", importedCount)
@@ -784,6 +824,30 @@ func (s *Server) importMusic(item importItem) importResult {
 		return res
 	}
 
+	if strings.TrimSpace(item.ArtistMBID) == "" || strings.TrimSpace(item.ArtistName) == "" || strings.TrimSpace(item.AlbumTitle) == "" {
+		res.Status = "error"
+		res.Message = "artist_mbid, artist_name, and album_title required"
+		return res
+	}
+	var audioFiles []string
+	if err := filepath.Walk(item.SourcePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && postprocess.IsAudioFile(info.Name()) {
+			audioFiles = append(audioFiles, path)
+		}
+		return nil
+	}); err != nil {
+		res.Status = "error"
+		res.Message = "cannot read source: " + err.Error()
+		return res
+	}
+	if len(audioFiles) == 0 {
+		res.Status = "error"
+		res.Message = "no audio files found"
+		return res
+	}
 	// Check already in library
 	var existingID int
 	if s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, item.ReleaseGroupID).Scan(&existingID) == nil {
@@ -830,7 +894,7 @@ func (s *Server) importMusic(item importItem) importResult {
 	// Create album with image URL
 	imageURL := fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", item.ReleaseGroupID)
 	result, err := s.db.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status)
-		VALUES (?, ?, ?, ?, 'album', ?, ?, 'available')`,
+		VALUES (?, ?, ?, ?, 'album', ?, ?, 'wanted')`,
 		artistID, item.ReleaseGroupID, albumTitle, year, item.QualityProfileID, imageURL)
 	if err != nil {
 		res.Status = "error"
@@ -852,18 +916,6 @@ func (s *Server) importMusic(item importItem) importResult {
 		}
 		s.db.Exec(`UPDATE albums SET track_count = ?, mbid = ? WHERE id = ?`, trackCount, release.ID, albumID)
 	}
-
-	// Find audio files
-	var audioFiles []string
-	filepath.Walk(item.SourcePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if postprocess.IsAudioFile(info.Name()) {
-			audioFiles = append(audioFiles, path)
-		}
-		return nil
-	})
 
 	// Get tracks from DB for matching
 	rows, err := s.db.Query(`SELECT id, number, disc_number, title FROM tracks WHERE album_id = ? ORDER BY disc_number, number`, albumID)
@@ -906,12 +958,19 @@ func (s *Server) importMusic(item importItem) importResult {
 		for _, t := range tracks {
 			if t.number == trackNum && (maxDisc == 1 || t.disc == discNum) {
 				ext := filepath.Ext(af)
-				destPath := postprocess.MusicTrackPath(s.cfg.MediaRoot, artistName, albumTitle, year, t.number, maxDisc, t.title, ext)
+				destPath := postprocess.MusicTrackPath(s.cfg.MediaRoot, artistName, albumTitle, year, t.number, t.disc, t.title, ext)
+				if err := validateImportDestination(s.cfg.MediaRoot, destPath); err != nil {
+					slog.Warn("unsafe import destination", "error", err)
+					continue
+				}
 				if err := moveFileForImport(af, destPath); err != nil {
 					slog.Warn("import track move failed", "track", t.number, "error", err)
 					continue
 				}
-				s.db.Exec(`UPDATE tracks SET file_path = ?, status = 'available' WHERE id = ?`, destPath, t.id)
+				if _, err := s.db.Exec(`UPDATE tracks SET file_path = ?, status = 'available' WHERE id = ?`, destPath, t.id); err != nil {
+					slog.Error("failed to record imported track", "error", err)
+					continue
+				}
 				importedTracks++
 				break
 			}
@@ -919,18 +978,32 @@ func (s *Server) importMusic(item importItem) importResult {
 	}
 
 	// Save cover art
-	albumDir := filepath.Join(s.cfg.MediaRoot, "music", postprocess.SanitizeFilename(artistName), postprocess.SanitizeFilename(albumTitle))
-	s.processor.SaveCoverToAlbumDir(int(albumID), albumDir, item.SourcePath)
+	albumDir := filepath.Dir(postprocess.MusicTrackPath(s.cfg.MediaRoot, artistName, albumTitle, year, 1, 1, "", ".flac"))
+	albumStatus := "wanted"
+	if importedTracks > 0 && importedTracks == trackCount {
+		albumStatus = "available"
+	}
+	if _, err := s.db.Exec(`UPDATE albums SET status = ?, root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, albumStatus, albumDir, albumID); err != nil {
+		res.Status = "error"
+		res.Message = "failed to save import status"
+		return res
+	}
+	if importedTracks > 0 && s.processor != nil {
+		s.processor.SaveCoverToAlbumDir(int(albumID), albumDir, item.SourcePath)
+	}
 
 	// Cache cover art in background
-	if s.coverart != nil {
-		go s.coverart.GetCover(item.ReleaseGroupID)
+	if coverart := s.coverart; coverart != nil {
+		go coverart.GetCover(item.ReleaseGroupID)
 	}
 
 	s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'imported', ?)`,
 		albumID, fmt.Sprintf("Imported %d/%d tracks for %s - %s", importedTracks, trackCount, artistName, albumTitle))
 
 	res.Status = "imported"
+	if importedTracks == 0 {
+		res.Status = "error"
+	}
 	res.LibraryID = int(albumID)
 	res.Message = fmt.Sprintf("Imported %d/%d tracks for %s - %s", importedTracks, trackCount, artistName, albumTitle)
 	slog.Info("imported music", "artist", artistName, "album", albumTitle, "tracks", importedTracks)
@@ -994,36 +1067,66 @@ func findAllVideoFiles(path string) []string {
 }
 
 func moveFileForImport(src, dst string) error {
-	dir := filepath.Dir(dst)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create directory %s: %w", dir, err)
+	sourceInfo, err := os.Stat(src)
+	if err != nil {
+		return err
 	}
-
-	// Try rename first (same filesystem)
-	if err := os.Rename(src, dst); err == nil {
+	if !sourceInfo.Mode().IsRegular() {
+		return fmt.Errorf("source is not a regular file")
+	}
+	if destInfo, err := os.Stat(dst); err == nil {
+		if os.SameFile(sourceInfo, destInfo) {
+			return nil
+		}
+		return fmt.Errorf("destination already exists: %s", dst)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	// Link is atomic and refuses to replace an existing destination. Fall back to
+	// exclusive creation for cross-volume moves or filesystems without hard links.
+	if err := os.Link(src, dst); err == nil {
+		if err := os.Remove(src); err != nil {
+			os.Remove(dst)
+			return err
+		}
 		return nil
 	}
-
-	// Cross-filesystem: stream copy then delete
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, sourceInfo.Mode().Perm())
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-
+	complete := false
+	defer func() {
+		out.Close()
+		if !complete {
+			os.Remove(dst)
+		}
+	}()
 	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
-	return os.Remove(src)
+	if err := in.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(src); err != nil {
+		return err
+	}
+	complete = true
+	return nil
 }
 
 // parseTrackNumber extracts track number from filename (same logic as postprocess).
@@ -1039,4 +1142,26 @@ func parseTrackNumber(filename string) (trackNum, discNum int) {
 		return t, 1
 	}
 	return 0, 1
+}
+
+func validateImportDestination(root, dest string) error {
+	rel, err := filepath.Rel(root, dest)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("import destination escapes media root")
+	}
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("import destination contains a symlink")
+		}
+	}
+	return nil
 }

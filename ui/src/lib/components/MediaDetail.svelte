@@ -10,9 +10,10 @@
 	const dispatch = createEventDispatcher();
 
 	let selectedProfile = (() => {
-		const keyword = item?.is_anime ? 'anime' : item?.type === 'movie' ? 'movie' : 'series';
-		const match = profiles.find(p => p.name.toLowerCase().includes(keyword));
-		return match?.id || profiles[0]?.id || 1;
+		const videoProfiles = profiles.filter(p => p.profile_type !== 'music');
+		const keyword = item?.is_anime || item?.anime ? 'anime' : item?.type === 'movie' ? 'movie' : 'series';
+		const match = videoProfiles.find(p => p.name.toLowerCase().includes(keyword));
+		return match?.id || videoProfiles[0]?.id || 0;
 	})();
 	let adding = false;
 	let searching = false;
@@ -47,6 +48,7 @@
 	})();
 
 	async function addToLibrary() {
+		if (adding || loadingSeasons) return;
 		// For TMDB series with potentially multiple seasons, show season picker
 		if (item.tmdb_id && (item.type === 'series' || item.is_anime) && !showSeasonPicker) {
 			loadingSeasons = true;
@@ -75,7 +77,7 @@
 			} else {
 				payload.tmdb_id = item.tmdb_id;
 				payload.type = item.type || 'movie';
-				payload.anime = item.is_anime || false;
+				payload.anime = item.is_anime || item.anime || false;
 			}
 			payload.quality_profile_id = selectedProfile;
 			if (showSeasonPicker && selectedSeasons.size > 0) {
@@ -181,7 +183,7 @@
 								</div>
 								<div class="add-row">
 									<select bind:value={selectedProfile}>
-										{#each profiles as p}
+										{#each profiles.filter(p => p.profile_type !== 'music') as p}
 											<option value={p.id}>{p.name}</option>
 										{/each}
 									</select>
@@ -194,7 +196,7 @@
 						{:else}
 							<div class="add-row">
 								<select bind:value={selectedProfile}>
-									{#each profiles as p}
+									{#each profiles.filter(p => p.profile_type !== 'music') as p}
 										<option value={p.id}>{p.name}</option>
 									{/each}
 								</select>

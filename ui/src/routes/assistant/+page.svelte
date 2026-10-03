@@ -1,7 +1,8 @@
 <script>
-	import { onMount, tick } from 'svelte';
+	import { onMount, onDestroy, tick } from 'svelte';
 	import { page } from '$app/stores';
 	import { api } from '$lib/api';
+	import { consumeSSE } from '$lib/sse';
 	import { notify } from '$lib/stores/app';
 	import RecommendationCard from '$lib/components/RecommendationCard.svelte';
 	import ToolIndicator from '$lib/components/ToolIndicator.svelte';
@@ -14,13 +15,23 @@
 	let isStreaming = false;
 	let toolStatus = null;
 	let inputText = '';
-	$: if ($page.url.searchParams.has('prompt')) inputText = $page.url.searchParams.get('prompt') || '';
+	$: if ($page.url.searchParams.has('prompt'))
+		inputText = $page.url.searchParams.get('prompt') || '';
 	let chatContainer;
 	let settings = null;
 	let loading = true;
 	let profiles = [];
 	let selectedItem = null;
 	let musicDetailItem = null;
+	let streamController;
+	let disposed = false;
+	let selecting = false;
+	let sessionRequest = 0;
+	onDestroy(() => {
+		disposed = true;
+		streamController?.abort();
+		sessionRequest++;
+	});
 
 	onMount(async () => {
 		try {
@@ -45,16 +56,28 @@
 
 	async function selectSession(id) {
 		if (isStreaming) return;
+		const request = ++sessionRequest;
+		selecting = true;
 		currentSessionId = id;
+		messages = [];
 		try {
 			const data = await api.aiGetSession(id);
+			if (disposed || request !== sessionRequest) return;
 			messages = (data.messages || [])
-				.filter(m => m.role === 'user' || m.role === 'assistant')
-				.map(m => ({ ...m, recommendations: extractRecommendations(m) }))
-				.filter(m => m.role === 'user' || m.content?.trim() || m.recommendations.length > 0);
+				.filter((m) => m.role === 'user' || m.role === 'assistant')
+				.map((m) => ({ ...m, recommendations: extractRecommendations(m) }))
+				.filter(
+					(m) =>
+						m.role === 'user' ||
+						m.content?.trim() ||
+						m.reasoning?.trim() ||
+						m.recommendations.length > 0
+				);
 			await scrollToBottom();
 		} catch (e) {
-			notify(e.message, 'error');
+			if (request === sessionRequest) notify(e.message, 'error');
+		} finally {
+			if (request === sessionRequest) selecting = false;
 		}
 	}
 
@@ -65,7 +88,7 @@
 			for (const tc of tcs) {
 				if (tc.function?.name === 'show_recommendations') {
 					const args = JSON.parse(tc.function.arguments);
-					return (args.recommendations || []).map(r => {
+					return (args.recommendations || []).map((r) => {
 						let poster_url = null;
 						if (r.media_type === 'music' && r.release_group_id) {
 							poster_url = `/api/music/cover?rgid=${r.release_group_id}`;
@@ -89,15 +112,20 @@
 
 	async function newChat() {
 		if (isStreaming) return;
+		sessionRequest++;
+		selecting = false;
 		currentSessionId = null;
 		messages = [];
 	}
 
 	async function deleteSession(id) {
+		if (isStreaming) return;
 		if (!confirm('Delete this conversation?')) return;
 		try {
 			await api.aiDeleteSession(id);
 			if (currentSessionId === id) {
+				sessionRequest++;
+				selecting = false;
 				currentSessionId = null;
 				messages = [];
 			}
@@ -108,7 +136,9 @@
 	}
 
 	async function sendMessage() {
-		if (!inputText.trim() || isStreaming) return;
+		if (!inputText.trim() || isStreaming || selecting) return;
+		isStreaming = true;
+		streamController = new AbortController();
 
 		let sessionId = currentSessionId;
 		if (!sessionId) {
@@ -119,6 +149,7 @@
 				await loadSessions();
 			} catch (e) {
 				notify(e.message, 'error');
+				isStreaming = false;
 				return;
 			}
 		}
@@ -126,13 +157,19 @@
 		const text = inputText.trim();
 		inputText = '';
 		messages = [...messages, { role: 'user', content: text, recommendations: [] }];
-		messages = [...messages, { role: 'assistant', content: '', streaming: true, recommendations: [] }];
+		messages = [
+			...messages,
+			{ role: 'assistant', content: '', streaming: true, recommendations: [] }
+		];
 		await scrollToBottom();
 
-		await streamResponse(api.aiChat(sessionId, text));
+		await streamResponse(api.aiChat(sessionId, text, streamController.signal));
 	}
 
 	async function getRecommendations() {
+		if (isStreaming || selecting) return;
+		isStreaming = true;
+		streamController = new AbortController();
 		let sessionId = currentSessionId;
 		if (!sessionId) {
 			try {
@@ -142,14 +179,18 @@
 				await loadSessions();
 			} catch (e) {
 				notify(e.message, 'error');
+				isStreaming = false;
 				return;
 			}
 		}
 
-		messages = [...messages, { role: 'assistant', content: '', streaming: true, recommendations: [] }];
+		messages = [
+			...messages,
+			{ role: 'assistant', content: '', streaming: true, recommendations: [] }
+		];
 		await scrollToBottom();
 
-		await streamResponse(api.aiRecommend(sessionId));
+		await streamResponse(api.aiRecommend(sessionId, streamController.signal));
 	}
 
 	async function streamResponse(responsePromise) {
@@ -163,43 +204,25 @@
 				throw new Error(err.error || 'Request failed');
 			}
 
-			const reader = response.body.getReader();
-			const decoder = new TextDecoder();
-			let buffer = '';
-			let currentEventType = '';
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || '';
-
-				for (const line of lines) {
-					if (line.startsWith('event: ')) {
-						currentEventType = line.slice(7).trim();
-						continue;
-					}
-					if (line.startsWith('data: ')) {
-						const dataStr = line.slice(6);
-						try {
-							const data = JSON.parse(dataStr);
-							handleSSEEvent(currentEventType, data);
-						} catch {}
-						currentEventType = '';
-					}
-				}
-			}
+			if (!response.body) throw new Error('The assistant returned an empty response.');
+			let completed = false;
+			await consumeSSE(response.body, (event, data) => {
+				if (event === 'done') completed = true;
+				if (!disposed) handleSSEEvent(event, data);
+			});
+			if (!completed)
+				throw new Error('The connection ended before the assistant finished. Try again.');
 		} catch (e) {
-			notify(e.message, 'error');
-			messages = messages.filter(m => !(m.streaming && m.content === '' && m.recommendations.length === 0));
+			if (!disposed && e.name !== 'AbortError') notify(e.message, 'error');
+			messages = messages.filter(
+				(m) => !(m.streaming && !m.content && !m.reasoning && m.recommendations.length === 0)
+			);
 		}
 
 		isStreaming = false;
 		toolStatus = null;
-		messages = messages.map(m => m.streaming ? { ...m, streaming: false } : m);
-		await loadSessions();
+		messages = messages.map((m) => (m.streaming ? { ...m, streaming: false } : m));
+		if (!disposed) await loadSessions();
 	}
 
 	function handleSSEEvent(eventType, data) {
@@ -207,6 +230,16 @@
 			case 'text':
 				appendToCurrentMessage(data.content);
 				scrollToBottom();
+				break;
+			case 'reasoning':
+				if (messages.length) {
+					const index = messages.length - 1;
+					messages[index] = {
+						...messages[index],
+						reasoning: (messages[index].reasoning || '') + (data.content || '')
+					};
+					messages = messages;
+				}
 				break;
 			case 'tool_call_start':
 				toolStatus = data.tool;
@@ -220,12 +253,15 @@
 				break;
 			case 'new_message':
 				// Tool loop continuing — create new assistant bubble
-				messages = [...messages, { role: 'assistant', content: '', streaming: true, recommendations: [] }];
+				messages = messages.map((message) => ({ ...message, streaming: false }));
+				messages = [
+					...messages,
+					{ role: 'assistant', content: '', streaming: true, recommendations: [] }
+				];
 				scrollToBottom();
 				break;
 			case 'error':
-				notify(data.message, 'error');
-				break;
+				throw new Error(data.message || data.error || 'The assistant request failed.');
 		}
 	}
 
@@ -240,7 +276,10 @@
 	function attachRecommendations(recs) {
 		const lastIdx = messages.length - 1;
 		if (lastIdx >= 0 && messages[lastIdx].role === 'assistant') {
-			messages[lastIdx] = { ...messages[lastIdx], recommendations: [...(messages[lastIdx].recommendations || []), ...recs] };
+			messages[lastIdx] = {
+				...messages[lastIdx],
+				recommendations: [...(messages[lastIdx].recommendations || []), ...recs]
+			};
 			messages = messages;
 		}
 	}
@@ -292,7 +331,9 @@
 			const trimmed = line.trim();
 
 			if (trimmed === '') {
-				if (cur.lines.length > 0) { blocks.push(cur); }
+				if (cur.lines.length > 0) {
+					blocks.push(cur);
+				}
 				cur = { type: 'text', lines: [] };
 				continue;
 			}
@@ -321,27 +362,29 @@
 		}
 		if (cur.lines.length > 0) blocks.push(cur);
 
-		return blocks.map(block => {
-			if (block.type === 'header') {
-				const l = block.lines[0];
-				const m3 = l.match(/^## (.+)/);
-				if (m3) return `<h3>${fmtInline(m3[1])}</h3>`;
-				const m4 = l.match(/^###+ (.+)/);
-				if (m4) return `<h4>${fmtInline(m4[1])}</h4>`;
-				return `<h4>${fmtInline(l.replace(/^#+\s*/, ''))}</h4>`;
-			}
-			if (block.type === 'list') {
-				const items = block.lines.map(l => {
-					const b = l.match(/^[-*] (.+)/);
-					if (b) return `<li>${fmtInline(b[1])}</li>`;
-					const o = l.match(/^\d+\. (.+)/);
-					if (o) return `<li class="ol-item">${fmtInline(o[1])}</li>`;
-					return `<li>${fmtInline(l)}</li>`;
-				});
-				return `<ul>${items.join('')}</ul>`;
-			}
-			return `<p>${fmtInline(block.lines.join('<br>'))}</p>`;
-		}).join('');
+		return blocks
+			.map((block) => {
+				if (block.type === 'header') {
+					const l = block.lines[0];
+					const m3 = l.match(/^## (.+)/);
+					if (m3) return `<h3>${fmtInline(m3[1])}</h3>`;
+					const m4 = l.match(/^###+ (.+)/);
+					if (m4) return `<h4>${fmtInline(m4[1])}</h4>`;
+					return `<h4>${fmtInline(l.replace(/^#+\s*/, ''))}</h4>`;
+				}
+				if (block.type === 'list') {
+					const items = block.lines.map((l) => {
+						const b = l.match(/^[-*] (.+)/);
+						if (b) return `<li>${fmtInline(b[1])}</li>`;
+						const o = l.match(/^\d+\. (.+)/);
+						if (o) return `<li class="ol-item">${fmtInline(o[1])}</li>`;
+						return `<li>${fmtInline(l)}</li>`;
+					});
+					return `<ul>${items.join('')}</ul>`;
+				}
+				return `<p>${fmtInline(block.lines.join('<br>'))}</p>`;
+			})
+			.join('');
 	}
 
 	function handleShowDetail(event) {
@@ -372,7 +415,9 @@
 		<div class="setup-prompt">
 			<div class="setup-card">
 				<h2>AI Assistant</h2>
-				<p>Configure an OpenRouter API key in Settings to enable the AI recommendation assistant.</p>
+				<p>
+					Configure an OpenRouter API key in Settings to enable the AI recommendation assistant.
+				</p>
 				<a href="/settings" class="btn btn-primary">Go to Settings</a>
 			</div>
 		</div>
@@ -380,20 +425,25 @@
 		<div class="assistant-layout">
 			<!-- Sidebar -->
 			<aside class="sidebar">
-				<button class="new-chat-btn" on:click={newChat}>+ New Chat</button>
+				<button class="new-chat-btn" on:click={newChat} disabled={isStreaming}>+ New Chat</button>
 
 				{#each [{ label: 'Today', items: grouped.today }, { label: 'Yesterday', items: grouped.yesterday }, { label: 'Older', items: grouped.older }] as group}
 					{#if group.items.length}
 						<div class="group-label">{group.label}</div>
 						{#each group.items as s}
-							<button
-								class="session-item"
-								class:active={currentSessionId === s.id}
-								on:click={() => selectSession(s.id)}
-							>
-								<span class="session-title">{s.title || 'New conversation'}</span>
-								<button class="delete-btn" on:click|stopPropagation={() => deleteSession(s.id)}>x</button>
-							</button>
+							<div class="session-item" class:active={currentSessionId === s.id}>
+								<button
+									class="session-title"
+									disabled={isStreaming}
+									on:click={() => selectSession(s.id)}>{s.title || 'New conversation'}</button
+								>
+								<button
+									class="delete-btn"
+									disabled={isStreaming}
+									aria-label={`Delete conversation ${s.title || 'New conversation'}`}
+									on:click={() => deleteSession(s.id)}>×</button
+								>
+							</div>
 						{/each}
 					{/if}
 				{/each}
@@ -402,12 +452,20 @@
 			<!-- Main chat area -->
 			<div class="chat-area">
 				<div class="messages" bind:this={chatContainer}>
+					{#if selecting}<p role="status">Loading conversation…</p>{/if}
 					{#if messages.length === 0 && !currentSessionId}
 						<div class="welcome">
 							<div class="welcome-card">
 								<h2>What should you watch or listen to next?</h2>
-								<p>I'll analyze your ratings and suggest personalized recommendations, or we can just chat about movies, series, anime, and music.</p>
-								<button class="btn btn-primary" on:click={getRecommendations}>
+								<p>
+									I'll analyze your ratings and suggest personalized recommendations, or we can just
+									chat about movies, series, anime, and music.
+								</p>
+								<button
+									class="btn btn-primary"
+									on:click={getRecommendations}
+									disabled={isStreaming || selecting}
+								>
 									Get Recommendations
 								</button>
 								<p class="welcome-sub">Or just start chatting below.</p>
@@ -423,6 +481,10 @@
 						{:else if msg.role === 'assistant'}
 							<div class="msg msg-assistant">
 								<div class="msg-bubble assistant-bubble">
+									{#if msg.reasoning}<details class="reasoning">
+											<summary>{msg.streaming ? 'Thinking…' : 'Model reasoning'}</summary>
+											<div>{msg.reasoning}</div>
+										</details>{/if}
 									{#if msg.content}
 										<div class="prose">{@html formatMarkdown(msg.content)}</div>
 									{/if}
@@ -432,7 +494,11 @@
 									{#if msg.recommendations && msg.recommendations.length > 0}
 										<div class="recs-inline">
 											{#each msg.recommendations as rec}
-												<RecommendationCard {rec} on:showDetail={handleShowDetail} on:showMusicDetail={handleShowMusicDetail} />
+												<RecommendationCard
+													{rec}
+													on:showDetail={handleShowDetail}
+													on:showMusicDetail={handleShowMusicDetail}
+												/>
 											{/each}
 										</div>
 									{/if}
@@ -455,11 +521,16 @@
 						on:keydown={handleKeydown}
 						placeholder="Ask about movies, series, anime, music..."
 						rows="1"
-						disabled={isStreaming}
+						aria-label="Message the assistant"
+						disabled={isStreaming || selecting}
 					></textarea>
-					<button class="send-btn" on:click={sendMessage} disabled={isStreaming || !inputText.trim()}>
-						{isStreaming ? '...' : 'Send'}
-					</button>
+					{#if isStreaming}<button class="send-btn" on:click={() => streamController?.abort()}
+							>Stop</button
+						>{:else}<button
+							class="send-btn"
+							on:click={sendMessage}
+							disabled={selecting || !inputText.trim()}>Send</button
+						>{/if}
 				</div>
 			</div>
 		</div>
@@ -468,9 +539,9 @@
 
 {#if selectedItem}
 	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<div class="modal-overlay" on:click={() => selectedItem = null} role="presentation">
+	<div class="modal-overlay" on:click={() => (selectedItem = null)} role="presentation">
 		<div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-			<button class="modal-close" on:click={() => selectedItem = null}>✕</button>
+			<button class="modal-close" on:click={() => (selectedItem = null)}>✕</button>
 			<MediaDetail
 				item={selectedItem}
 				{profiles}
@@ -484,9 +555,9 @@
 
 {#if musicDetailItem}
 	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<div class="modal-overlay" on:click={() => musicDetailItem = null} role="presentation">
+	<div class="modal-overlay" on:click={() => (musicDetailItem = null)} role="presentation">
 		<div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-			<button class="modal-close" on:click={() => musicDetailItem = null}>✕</button>
+			<button class="modal-close" on:click={() => (musicDetailItem = null)}>✕</button>
 			<MusicDetail
 				item={musicDetailItem}
 				{profiles}
@@ -500,23 +571,44 @@
 <style>
 	/* ── Keyframes ── */
 	@keyframes fadeIn {
-		from { opacity: 0; }
-		to { opacity: 1; }
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
 	}
 
 	@keyframes slideUp {
-		from { transform: translateY(20px); opacity: 0; }
-		to { transform: translateY(0); opacity: 1; }
+		from {
+			transform: translateY(20px);
+			opacity: 0;
+		}
+		to {
+			transform: translateY(0);
+			opacity: 1;
+		}
 	}
 
 	@keyframes fadeSlideUp {
-		from { opacity: 0; transform: translateY(8px); }
-		to { opacity: 1; transform: translateY(0); }
+		from {
+			opacity: 0;
+			transform: translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	@keyframes pulse {
-		0%, 100% { opacity: 0.3; }
-		50% { opacity: 1; }
+		0%,
+		100% {
+			opacity: 0.3;
+		}
+		50% {
+			opacity: 1;
+		}
 	}
 
 	/* ── Modal ── */
@@ -581,7 +673,8 @@
 		font-family: var(--font-body);
 	}
 
-	.loading, .setup-prompt {
+	.loading,
+	.setup-prompt {
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -700,7 +793,9 @@
 		cursor: pointer;
 		text-align: left;
 		font-family: var(--font-body);
-		transition: background 0.25s ease, color 0.25s ease;
+		transition:
+			background 0.25s ease,
+			color 0.25s ease;
 	}
 	.session-item:hover {
 		background: var(--bg-hover);
@@ -711,13 +806,20 @@
 		color: var(--text-primary);
 	}
 	.session-title {
+		background: none;
+		border: none;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+		padding: 0.25rem 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 		flex: 1;
 	}
 	.delete-btn {
-		opacity: 0;
+		opacity: 0.7;
 		background: none;
 		border: none;
 		color: var(--text-muted);
@@ -725,13 +827,30 @@
 		cursor: pointer;
 		padding: 0 0.25rem;
 		flex-shrink: 0;
-		transition: opacity 0.25s ease, color 0.2s ease;
+		transition:
+			opacity 0.25s ease,
+			color 0.2s ease;
 	}
 	.session-item:hover .delete-btn {
 		opacity: 1;
 	}
 	.delete-btn:hover {
 		color: var(--danger);
+	}
+	.reasoning {
+		margin-bottom: 0.7rem;
+		color: var(--text-secondary);
+		font-size: 0.82rem;
+	}
+	.reasoning summary {
+		cursor: pointer;
+	}
+	.reasoning > div {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		margin-top: 0.5rem;
+		max-height: 240px;
+		overflow-y: auto;
 	}
 
 	/* ── Chat Area ── */
@@ -832,7 +951,9 @@
 		font-family: var(--font-display);
 		letter-spacing: -0.02em;
 	}
-	.prose :global(h3:first-child) { margin-top: 0; }
+	.prose :global(h3:first-child) {
+		margin-top: 0;
+	}
 	.prose :global(h4) {
 		font-size: 0.88rem;
 		font-weight: 700;
@@ -841,14 +962,20 @@
 		font-family: var(--font-display);
 		letter-spacing: -0.02em;
 	}
-	.prose :global(h4:first-child) { margin-top: 0; }
+	.prose :global(h4:first-child) {
+		margin-top: 0;
+	}
 	.prose :global(p) {
 		margin: 0.3rem 0;
 		line-height: 1.55;
 		font-family: var(--font-body);
 	}
-	.prose :global(p:first-child) { margin-top: 0; }
-	.prose :global(p:last-child) { margin-bottom: 0; }
+	.prose :global(p:first-child) {
+		margin-top: 0;
+	}
+	.prose :global(p:last-child) {
+		margin-bottom: 0;
+	}
 	.prose :global(strong) {
 		color: var(--accent);
 		font-weight: 700;
@@ -932,11 +1059,15 @@
 		min-height: 38px;
 		max-height: 120px;
 		font-family: var(--font-body);
-		transition: border-color 0.25s ease, box-shadow 0.25s ease;
+		transition:
+			border-color 0.25s ease,
+			box-shadow 0.25s ease;
 	}
 	textarea:focus {
 		border-color: var(--accent);
-		box-shadow: 0 0 0 3px rgba(var(--accent-rgb, 99, 102, 241), 0.2), 0 0 12px rgba(var(--accent-rgb, 99, 102, 241), 0.15);
+		box-shadow:
+			0 0 0 3px rgba(var(--accent-rgb, 99, 102, 241), 0.2),
+			0 0 12px rgba(var(--accent-rgb, 99, 102, 241), 0.15);
 	}
 	.send-btn {
 		padding: 0.6rem 1.25rem;
@@ -963,7 +1094,11 @@
 
 	/* ── Responsive ── */
 	@media (max-width: 768px) {
-		.sidebar { display: none; }
-		.msg { max-width: 95%; }
+		.sidebar {
+			display: none;
+		}
+		.msg {
+			max-width: 95%;
+		}
 	}
 </style>

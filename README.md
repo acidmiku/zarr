@@ -46,7 +46,7 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Go 1.22+ with embedded HTTP server |
+| Backend | Go 1.24+ with embedded HTTP server |
 | Frontend | SvelteKit + TypeScript |
 | Database | SQLite (embedded, zero config) |
 | Container | Multi-stage Docker build (Node > Go > Alpine) |
@@ -57,13 +57,12 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/zarr.git
+git clone https://github.com/acidmiku/zarr.git
 cd zarr
-mkdir -p data/{config,media,sabnzbd-config,usenet}
-docker compose up -d
+docker compose up -d --build
 ```
 
-Open http://localhost:9876 and complete the setup wizard.
+Open [Zarr](http://localhost:9876). Add connections in Quick start or open the library immediately. The bundled downloaders receive generated credentials automatically; provider keys, indexers, Usenet servers, and AI settings are managed in the UI. No `.env` editing is required.
 
 ## Documentation
 

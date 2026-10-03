@@ -1,0 +1,14 @@
+.git
+data
+tmp
+temp
+*.env
+.env*
+*.db*
+*.exe
+ui/node_modules
+ui/build
+ui/.svelte-kit
+ui/test-results
+ui/playwright-report
+internal/server/static

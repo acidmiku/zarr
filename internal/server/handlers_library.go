@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"mediaforge/internal/postprocess"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -29,6 +31,22 @@ func (s *Server) handleAddToLibrary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.AniListID <= 0 && req.Type != "movie" && req.Type != "series" {
+		writeError(w, 400, "type must be movie or series")
+		return
+	}
+	for _, season := range req.Seasons {
+		if season < 0 {
+			writeError(w, 400, "season numbers cannot be negative")
+			return
+		}
+	}
+	var err error
+	req.QualityProfileID, err = s.resolveProfile(req.QualityProfileID, "video")
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
 	if req.AniListID > 0 {
 		s.addAnimeToLibrary(w, req)
 		return
@@ -73,7 +91,7 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 			string(genresJSON),
 			movie.VoteAverage,
 			req.QualityProfileID,
-			fmt.Sprintf("%s/movies/%s (%d)", s.cfg.MediaRoot, movie.Title, year),
+			filepath.Dir(postprocess.MoviePath(s.cfg.MediaRoot, movie.Title, year, ".mkv")),
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
@@ -108,7 +126,39 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 
 		anime := req.Anime || s.tmdb.IsAnime(tv)
 
-		result, err := s.db.Exec(`INSERT INTO media_items
+		selectedSeasons := make(map[int]bool)
+		for _, sn := range req.Seasons {
+			selectedSeasons[sn] = true
+		}
+		details := make(map[int]*metadata.TMDBSeasonDetail)
+		for _, season := range tv.Seasons {
+			if len(selectedSeasons) > 0 && !selectedSeasons[season.SeasonNumber] {
+				continue
+			}
+			if season.SeasonNumber == 0 && !anime && !selectedSeasons[0] {
+				continue
+			}
+			detail, err := s.tmdb.GetSeason(tv.ID, season.SeasonNumber)
+			if err != nil {
+				writeError(w, 502, "failed to fetch season metadata: "+err.Error())
+				return
+			}
+			details[season.SeasonNumber] = detail
+		}
+		for sn := range selectedSeasons {
+			if details[sn] == nil {
+				writeError(w, 400, "requested season does not exist")
+				return
+			}
+		}
+		tx, err := s.db.Begin()
+		if err != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		defer tx.Rollback()
+
+		result, err := tx.Exec(`INSERT INTO media_items
 			(type, title, year, anime, tmdb_id, imdb_id, tvdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id)
 			VALUES ('series', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?)`,
 			tv.Name, year, anime, tv.ID,
@@ -131,54 +181,24 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 
 		mediaID, _ := result.LastInsertId()
 
-		// Build set of selected seasons (if specified)
-		selectedSeasons := make(map[int]bool)
-		for _, sn := range req.Seasons {
-			selectedSeasons[sn] = true
-		}
-
-		// Fetch seasons and episodes
 		for _, season := range tv.Seasons {
-			if season.SeasonNumber == 0 && !anime {
-				continue // skip specials for non-anime unless explicitly requested
-			}
-			// If user selected specific seasons, skip unselected ones
-			if len(selectedSeasons) > 0 && !selectedSeasons[season.SeasonNumber] {
+			detail := details[season.SeasonNumber]
+			if detail == nil {
 				continue
 			}
-
-			s.db.Exec(`INSERT INTO seasons (media_item_id, number, title, overview, poster_url)
-				VALUES (?, ?, ?, ?, ?)`,
-				mediaID, season.SeasonNumber, season.Name, season.Overview,
-				metadata.PosterURL(season.PosterPath))
-
-			var seasonID int64
-			s.db.QueryRow(`SELECT id FROM seasons WHERE media_item_id = ? AND number = ?`,
-				mediaID, season.SeasonNumber).Scan(&seasonID)
-
-			// Fetch episode details
-			seasonDetail, err := s.tmdb.GetSeason(tv.ID, season.SeasonNumber)
-			if err != nil {
-				continue
-			}
-
-			for _, ep := range seasonDetail.Episodes {
-				epType := "standard"
-				if season.SeasonNumber == 0 {
-					epType = "special"
-				}
-
-				s.db.Exec(`INSERT INTO episodes
-					(season_id, media_item_id, number, episode_type, title, overview, air_date)
-					VALUES (?, ?, ?, ?, ?, ?, ?)`,
-					seasonID, mediaID, ep.EpisodeNumber, epType,
-					ep.Name, ep.Overview, ep.AirDate)
+			if err := insertSeason(tx, mediaID, season, detail); err != nil {
+				writeError(w, 500, "failed to save season: "+err.Error())
+				return
 			}
 		}
 
-		s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'added', ?)`,
+		tx.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'added', ?)`,
 			mediaID, fmt.Sprintf("Added %s (%d)", tv.Name, year))
 
+		if err := tx.Commit(); err != nil {
+			writeError(w, 500, "failed to save series")
+			return
+		}
 		writeJSON(w, 201, map[string]int64{"id": mediaID})
 	}
 }
@@ -206,7 +226,13 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 	}
 	tagsJSON, _ := json.Marshal(tagNames)
 
-	result, err := s.db.Exec(`INSERT INTO media_items
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT INTO media_items
 		(type, title, year, anime, anilist_id, overview, poster_url, backdrop_url, genres, tags, rating, rating_source, quality_profile_id)
 		VALUES ('series', ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, 'anilist', ?)`,
 		title, media.StartDate.Year,
@@ -227,22 +253,28 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 
 	mediaID, _ := result.LastInsertId()
 
-	// Create a single season with episodes based on episode count
 	if media.Episodes > 0 {
-		s.db.Exec(`INSERT INTO seasons (media_item_id, number, title) VALUES (?, 1, 'Season 1')`, mediaID)
-		var seasonID int64
-		s.db.QueryRow(`SELECT id FROM seasons WHERE media_item_id = ? AND number = 1`, mediaID).Scan(&seasonID)
-
+		result, err := tx.Exec(`INSERT INTO seasons (media_item_id,number,title) VALUES (?,1,'Season 1')`, mediaID)
+		if err != nil {
+			writeError(w, 500, "failed to save season")
+			return
+		}
+		seasonID, _ := result.LastInsertId()
 		for i := 1; i <= media.Episodes; i++ {
-			s.db.Exec(`INSERT INTO episodes (season_id, media_item_id, number, absolute_number, episode_type)
-				VALUES (?, ?, ?, ?, 'standard')`,
-				seasonID, mediaID, i, i)
+			if _, err := tx.Exec(`INSERT INTO episodes (season_id,media_item_id,number,absolute_number,episode_type) VALUES (?,?,?,?,'standard')`, seasonID, mediaID, i, i); err != nil {
+				writeError(w, 500, "failed to save episodes")
+				return
+			}
 		}
 	}
 
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'added', ?)`,
+	tx.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'added', ?)`,
 		mediaID, fmt.Sprintf("Added %s", title))
 
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "failed to save anime")
+		return
+	}
 	writeJSON(w, 201, map[string]int64{"id": mediaID})
 }
 
@@ -281,24 +313,24 @@ func (s *Server) handleListLibrary(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type libraryEntry struct {
-		ID        int            `json:"id"`
-		Type      string         `json:"type"`
-		Title     string         `json:"title"`
-		Year      sql.NullInt64  `json:"-"`
-		YearVal   int            `json:"year"`
-		Anime     bool           `json:"anime"`
-		TMDBID    sql.NullInt64  `json:"-"`
-		TMDBIDVal int            `json:"tmdb_id,omitempty"`
-		AniListID sql.NullInt64  `json:"-"`
-		AniListVal int           `json:"anilist_id,omitempty"`
-		PosterURL sql.NullString `json:"-"`
-		PosterVal string         `json:"poster_url"`
-		Status    string         `json:"status"`
-		Rating    sql.NullFloat64 `json:"-"`
-		RatingVal float64        `json:"rating"`
-		Genres    sql.NullString `json:"-"`
-		GenresVal json.RawMessage `json:"genres"`
-		AddedAt   string         `json:"added_at"`
+		ID         int             `json:"id"`
+		Type       string          `json:"type"`
+		Title      string          `json:"title"`
+		Year       sql.NullInt64   `json:"-"`
+		YearVal    int             `json:"year"`
+		Anime      bool            `json:"anime"`
+		TMDBID     sql.NullInt64   `json:"-"`
+		TMDBIDVal  int             `json:"tmdb_id,omitempty"`
+		AniListID  sql.NullInt64   `json:"-"`
+		AniListVal int             `json:"anilist_id,omitempty"`
+		PosterURL  sql.NullString  `json:"-"`
+		PosterVal  string          `json:"poster_url"`
+		Status     string          `json:"status"`
+		Rating     sql.NullFloat64 `json:"-"`
+		RatingVal  float64         `json:"rating"`
+		Genres     sql.NullString  `json:"-"`
+		GenresVal  json.RawMessage `json:"genres"`
+		AddedAt    string          `json:"added_at"`
 	}
 
 	var items []libraryEntry
@@ -415,19 +447,45 @@ func (s *Server) handleGetLibraryItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if nullYear.Valid { item.Year = int(nullYear.Int64) }
-	if nullTMDB.Valid { item.TMDBID = int(nullTMDB.Int64) }
-	if nullIMDB.Valid { item.IMDBID = nullIMDB.String }
-	if nullAniList.Valid { item.AniListID = int(nullAniList.Int64) }
-	if nullTVDB.Valid { item.TVDBID = int(nullTVDB.Int64) }
-	if nullOverview.Valid { item.Overview = nullOverview.String }
-	if nullPoster.Valid { item.PosterURL = nullPoster.String }
-	if nullBackdrop.Valid { item.BackdropURL = nullBackdrop.String }
-	if nullGenres.Valid { item.Genres = nullGenres.String }
-	if nullTags.Valid { item.Tags = nullTags.String }
-	if nullRating.Valid { item.Rating = nullRating.Float64 }
-	if nullProfileID.Valid { item.QualityProfileID = int(nullProfileID.Int64) }
-	if nullRootPath.Valid { item.RootPath = nullRootPath.String }
+	if nullYear.Valid {
+		item.Year = int(nullYear.Int64)
+	}
+	if nullTMDB.Valid {
+		item.TMDBID = int(nullTMDB.Int64)
+	}
+	if nullIMDB.Valid {
+		item.IMDBID = nullIMDB.String
+	}
+	if nullAniList.Valid {
+		item.AniListID = int(nullAniList.Int64)
+	}
+	if nullTVDB.Valid {
+		item.TVDBID = int(nullTVDB.Int64)
+	}
+	if nullOverview.Valid {
+		item.Overview = nullOverview.String
+	}
+	if nullPoster.Valid {
+		item.PosterURL = nullPoster.String
+	}
+	if nullBackdrop.Valid {
+		item.BackdropURL = nullBackdrop.String
+	}
+	if nullGenres.Valid {
+		item.Genres = nullGenres.String
+	}
+	if nullTags.Valid {
+		item.Tags = nullTags.String
+	}
+	if nullRating.Valid {
+		item.Rating = nullRating.Float64
+	}
+	if nullProfileID.Valid {
+		item.QualityProfileID = int(nullProfileID.Int64)
+	}
+	if nullRootPath.Valid {
+		item.RootPath = nullRootPath.String
+	}
 
 	// Check if files actually exist on disk
 	if item.Type == "movie" && item.RootPath != "" {
@@ -461,12 +519,21 @@ func (s *Server) handleUpdateLibraryItem(w http.ResponseWriter, r *http.Request)
 	}
 
 	if req.QualityProfileID != nil {
-		s.db.Exec(`UPDATE media_items SET quality_profile_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-			*req.QualityProfileID, id)
+		profileID, err := s.resolveProfile(*req.QualityProfileID, "video")
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		req.QualityProfileID = &profileID
 	}
-	if req.Anime != nil {
-		s.db.Exec(`UPDATE media_items SET anime = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-			*req.Anime, id)
+	result, err := s.db.Exec(`UPDATE media_items SET quality_profile_id = COALESCE(?,quality_profile_id), anime = COALESCE(?,anime), updated_at = CURRENT_TIMESTAMP WHERE id = ?`, req.QualityProfileID, req.Anime, id)
+	if err != nil {
+		writeError(w, 500, "failed to update library item")
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		writeError(w, 404, "library item not found")
+		return
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "updated"})
@@ -478,53 +545,139 @@ func (s *Server) handleDeleteLibraryItem(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid id")
 		return
 	}
-
-	deleteFiles := r.URL.Query().Get("delete_files") == "true"
-
-	// 1. Cancel any active SABnzbd downloads for this media item
-	dlRows, err := s.db.Query(`SELECT id, sabnzbd_nzo_id FROM downloads
-		WHERE media_item_id = ? AND status NOT IN ('imported', 'failed')`, id)
-	if err == nil {
-		for dlRows.Next() {
-			var dlID int
-			var nzoID sql.NullString
-			if dlRows.Scan(&dlID, &nzoID) == nil {
-				if nzoID.Valid && nzoID.String != "" {
-					s.grabber.DeleteFromQueue(nzoID.String)
-				}
+	var root sql.NullString
+	if err := s.db.QueryRow(`SELECT root_path FROM media_items WHERE id = ?`, id).Scan(&root); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, 404, "library item not found")
+		} else {
+			writeError(w, 500, "database error")
+		}
+		return
+	}
+	var paths []string
+	if r.URL.Query().Get("delete_files") == "true" {
+		rows, err := s.db.Query(`SELECT file_path FROM episodes WHERE media_item_id = ? AND file_path IS NOT NULL AND file_path != ''`, id)
+		if err != nil {
+			writeError(w, 500, "failed to list library files")
+			return
+		}
+		for rows.Next() {
+			var path string
+			if err := rows.Scan(&path); err != nil {
+				rows.Close()
+				writeError(w, 500, "failed to read library files")
+				return
+			}
+			paths = append(paths, path)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			writeError(w, 500, "failed to read library files")
+			return
+		}
+		if root.Valid && root.String != "" {
+			paths = append(paths, root.String)
+		}
+		for _, path := range paths {
+			if err := validateLibraryDeletePath(s.cfg.MediaRoot, path); err != nil {
+				writeError(w, 400, err.Error())
+				return
 			}
 		}
-		dlRows.Close()
+	}
+	// Cancel remote transfers first. A failure must leave library records intact.
+	rows, err := s.db.Query(`SELECT id,download_type,COALESCE(sabnzbd_nzo_id,''),COALESCE(qbt_hash,'') FROM downloads WHERE media_item_id = ? AND status NOT IN ('imported','failed')`, id)
+	if err != nil {
+		writeError(w, 500, "failed to list downloads")
+		return
+	}
+	type transfer struct {
+		id              int
+		kind, nzb, hash string
+	}
+	var transfers []transfer
+	for rows.Next() {
+		var t transfer
+		if err := rows.Scan(&t.id, &t.kind, &t.nzb, &t.hash); err != nil {
+			rows.Close()
+			writeError(w, 500, "failed to read downloads")
+			return
+		}
+		transfers = append(transfers, t)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		writeError(w, 500, "failed to read downloads")
+		return
+	}
+	for _, t := range transfers {
+		if err := s.cancelClientDownload(t.id, t.kind, sql.NullString{String: t.hash, Valid: t.hash != ""}, sql.NullString{String: t.nzb, Valid: t.nzb != ""}); err != nil {
+			writeError(w, 502, "failed to cancel active download: "+err.Error())
+			return
+		}
 	}
 
-	// 2. Delete episode files from disk if requested
-	if deleteFiles {
-		epRows, _ := s.db.Query(`SELECT file_path FROM episodes WHERE media_item_id = ? AND file_path IS NOT NULL`, id)
-		if epRows != nil {
-			for epRows.Next() {
-				var fp string
-				if epRows.Scan(&fp) == nil && fp != "" {
-					os.Remove(fp)
-				}
-			}
-			epRows.Close()
-		}
-
-		var rootPath sql.NullString
-		s.db.QueryRow(`SELECT root_path FROM media_items WHERE id = ?`, id).Scan(&rootPath)
-		if rootPath.Valid && rootPath.String != "" {
-			os.RemoveAll(rootPath.String)
+	for _, path := range paths {
+		if err := os.RemoveAll(path); err != nil {
+			writeError(w, 500, "failed to remove library files")
+			return
 		}
 	}
-
-	// 3. Clean up records without CASCADE (downloads, activity_log)
-	s.db.Exec(`DELETE FROM downloads WHERE media_item_id = ?`, id)
-	s.db.Exec(`DELETE FROM activity_log WHERE media_item_id = ?`, id)
-
-	// 4. Delete the media item (seasons/episodes cascade automatically)
-	s.db.Exec(`DELETE FROM media_items WHERE id = ?`, id)
-
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback()
+	for _, query := range []string{`DELETE FROM downloads WHERE media_item_id = ?`, `DELETE FROM activity_log WHERE media_item_id = ?`, `DELETE FROM media_items WHERE id = ?`} {
+		if _, err := tx.Exec(query, id); err != nil {
+			writeError(w, 500, "failed to remove library records")
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "failed to remove library records")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
+}
+
+// Reject broad, escaped and symlinked paths before deleting user files.
+func validateLibraryDeletePath(root, target string) error {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	within := func(base, path string) bool {
+		rel, err := filepath.Rel(base, path)
+		return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(strings.Split(rel, string(filepath.Separator))) >= 2
+	}
+	if !within(rootAbs, targetAbs) {
+		return fmt.Errorf("refusing to delete a path outside an individual library item")
+	}
+	if _, err := os.Lstat(targetAbs); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	realRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return err
+	}
+	realTarget, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		return err
+	}
+	if !within(realRoot, realTarget) {
+		return fmt.Errorf("refusing to delete a library path linked outside its media root")
+	}
+	return nil
 }
 
 func (s *Server) handleAddSeasons(w http.ResponseWriter, r *http.Request) {
@@ -550,7 +703,7 @@ func (s *Server) handleAddSeasons(w http.ResponseWriter, r *http.Request) {
 	var tmdbID int
 	var mediaType string
 	var anime bool
-	err = s.db.QueryRow(`SELECT tmdb_id, type, anime FROM media_items WHERE id = ?`, mediaID).Scan(&tmdbID, &mediaType, &anime)
+	err = s.db.QueryRow(`SELECT COALESCE(tmdb_id,0), type, anime FROM media_items WHERE id = ?`, mediaID).Scan(&tmdbID, &mediaType, &anime)
 	if err != nil {
 		writeError(w, 404, "media item not found")
 		return
@@ -575,8 +728,13 @@ func (s *Server) handleAddSeasons(w http.ResponseWriter, r *http.Request) {
 	// Filter to new seasons only
 	var newSeasons []int
 	for _, sn := range req.Seasons {
+		if sn < 0 {
+			writeError(w, 400, "season numbers cannot be negative")
+			return
+		}
 		if !existing[sn] {
 			newSeasons = append(newSeasons, sn)
+			existing[sn] = true
 		}
 	}
 	if len(newSeasons) == 0 {
@@ -600,45 +758,45 @@ func (s *Server) handleAddSeasons(w http.ResponseWriter, r *http.Request) {
 		tmdbSeasonMap[s.SeasonNumber] = s
 	}
 
-	added := 0
+	details := make(map[int]*metadata.TMDBSeasonDetail)
 	for _, sn := range newSeasons {
-		season, ok := tmdbSeasonMap[sn]
-		if !ok {
-			continue
+		if _, ok := tmdbSeasonMap[sn]; !ok {
+			writeError(w, 400, "requested season does not exist")
+			return
 		}
-
-		s.db.Exec(`INSERT INTO seasons (media_item_id, number, title, overview, poster_url)
-			VALUES (?, ?, ?, ?, ?)`,
-			mediaID, season.SeasonNumber, season.Name, season.Overview,
-			metadata.PosterURL(season.PosterPath))
-
-		var seasonID int64
-		s.db.QueryRow(`SELECT id FROM seasons WHERE media_item_id = ? AND number = ?`,
-			mediaID, season.SeasonNumber).Scan(&seasonID)
-
-		seasonDetail, err := s.tmdb.GetSeason(tmdbID, season.SeasonNumber)
+		detail, err := s.tmdb.GetSeason(tmdbID, sn)
 		if err != nil {
-			continue
+			writeError(w, 502, "failed to fetch season metadata: "+err.Error())
+			return
 		}
-
-		for _, ep := range seasonDetail.Episodes {
-			epType := "standard"
-			if season.SeasonNumber == 0 {
-				epType = "special"
-			}
-			s.db.Exec(`INSERT INTO episodes
-				(season_id, media_item_id, number, episode_type, title, overview, air_date)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				seasonID, mediaID, ep.EpisodeNumber, epType,
-				ep.Name, ep.Overview, ep.AirDate)
-		}
-		added++
+		details[sn] = detail
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback()
+	for _, sn := range newSeasons {
+		if err := insertSeason(tx, int64(mediaID), tmdbSeasonMap[sn], details[sn]); err != nil {
+			writeError(w, 409, "season could not be added: "+err.Error())
+			return
+		}
+	}
+	if _, err := tx.Exec(`UPDATE media_items SET status = 'wanted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'available'`, mediaID); err != nil {
+		writeError(w, 500, "failed to update series")
+		return
+	}
+	if _, err := tx.Exec(`INSERT INTO activity_log (media_item_id,action,details) VALUES (?,'seasons_added',?)`, mediaID, fmt.Sprintf("Added %d new season(s)", len(newSeasons))); err != nil {
+		writeError(w, 500, "failed to save activity")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "failed to save seasons")
+		return
+	}
+	writeJSON(w, 200, map[string]int{"seasons_added": len(newSeasons)})
 
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'seasons_added', ?)`,
-		mediaID, fmt.Sprintf("Added %d new season(s)", added))
-
-	writeJSON(w, 200, map[string]int{"seasons_added": added})
 }
 
 func genreNames(genres []metadata.TMDBGenre) []string {
@@ -647,4 +805,25 @@ func genreNames(genres []metadata.TMDBGenre) []string {
 		names[i] = g.Name
 	}
 	return names
+}
+
+func insertSeason(tx *sql.Tx, mediaID int64, season metadata.TMDBSeason, detail *metadata.TMDBSeasonDetail) error {
+	result, err := tx.Exec(`INSERT INTO seasons (media_item_id,number,title,overview,poster_url) VALUES (?,?,?,?,?)`, mediaID, season.SeasonNumber, season.Name, season.Overview, metadata.PosterURL(season.PosterPath))
+	if err != nil {
+		return err
+	}
+	seasonID, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	for _, ep := range detail.Episodes {
+		kind := "standard"
+		if season.SeasonNumber == 0 {
+			kind = "special"
+		}
+		if _, err := tx.Exec(`INSERT INTO episodes (season_id,media_item_id,number,episode_type,title,overview,air_date) VALUES (?,?,?,?,?,?,?)`, seasonID, mediaID, ep.EpisodeNumber, kind, ep.Name, ep.Overview, ep.AirDate); err != nil {
+			return err
+		}
+	}
+	return nil
 }

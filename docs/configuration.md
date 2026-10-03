@@ -1,88 +1,61 @@
 # Configuration
 
-## Initial Setup
+All provider keys and download connections can be managed in **Settings**. Quick start uses the same forms; you can complete setup without an indexer or assistant account.
 
-### 1. TMDB API Key
+## Connections
 
-- Visit https://www.themoviedb.org/settings/api
-- Copy your API key
-- Paste into Settings > TMDB API Key
+| Connection | What to enter | Test behavior |
+| --- | --- | --- |
+| TMDB | API key or read access token | Authenticated configuration request |
+| SABnzbd | Base URL and API key | Authenticated queue request |
+| qBittorrent | Enabled, base URL, username, password | Login and version request |
+| OpenRouter | API key, model ID, reasoning effort | Authenticated key check; no paid completion |
+| Last.fm | Optional API key | Enables music discovery |
+| Brave Search | Optional API key | Enables assistant web search |
 
-### 2. SABnzbd Configuration
+Tests use the current form values and fall back to saved credentials for blank secret fields. Testing never changes the active connection. Save applies changes immediately, including proxy routing and background metadata refresh.
 
-Access SABnzbd at http://localhost:8080 and configure:
+Saved secret fields are blank with a configured indicator. Leaving them blank preserves the existing value; the API supports explicit `clear_<setting_name>: true` when removing a key. Settings and indexer list APIs never return secret values. Regular settings are saved together in one transaction, so invalid input cannot partially replace your configuration.
 
-**a. Usenet Server**
-- Settings > Servers > Add your Usenet provider credentials
+The default media root is `/data/media`. Use an absolute path visible inside the Zarr container. Configure paths shared by the downloader and Zarr identically; a host path like `C:\Media` is not a Linux container path.
 
-**b. Folders (Settings > Folders)**
-- Temporary Download Folder: `/data/usenet/incomplete`
-- Completed Download Folder: `/data/usenet/complete`
+## Indexers
 
-**c. Categories (Settings > Categories)**
-- Add a new category named: `mediaforge`
-- Check the `+Delete` option
-- This tells SABnzbd to delete downloads after processing, saving disk space
+Settings supports creating, editing, enabling, testing, and deleting Newznab and Rutracker connections. Set the supported content types and priority for each source. NZBGeek's preset uses `https://api.nzbgeek.info`; supply your own API key. Editing a source does not require re-entering its secret.
 
-**d. Security (Settings > General > Security)**
-- Host Whitelist: Add `sabnzbd, localhost, 127.0.0.1`
-  - This allows Zarr to connect via Docker's internal network
-  - **Critical:** Without this, Zarr's requests will be rejected
+Indexer access and Usenet provider access are separate: the indexer finds NZBs, while the provider delivers their articles.
 
-**e. API Key**
-- Copy the API key from Settings > General > API Key
-- In Zarr Settings > SABnzbd:
-  - URL: `http://sabnzbd:8080` (use Docker service name)
-  - API Key: (paste from SABnzbd)
+## Usenet servers / backbones
 
-### 3. qBittorrent Configuration (Optional)
+Configure SABnzbd first, then use **Usenet servers** in Zarr to add or edit providers. These forms manage SABnzbd's actual server configuration through its [configuration API](https://sabnzbd.org/wiki/advanced/api), so you do not have to visit a second application.
 
-If you want torrent support alongside Usenet:
+Each provider has a display name, hostname, port, TLS setting, username, password, connection limit, enabled state, and priority. Saved passwords stay in SABnzbd. Blank password edits preserve them. The Test action verifies the saved NNTP connection and authentication. Deleting a provider removes it from SABnzbd.
 
-- Add the qBittorrent service to your `docker-compose.yml`
-- In Zarr Settings > qBittorrent:
-  - URL: `http://qbittorrent:8080` (Docker service name)
-  - Username/Password: your qBittorrent Web UI credentials
-- Zarr uses the `zarr` category and tags downloads with `dl_{id}` for tracking
+The Newsgroup Ninja preset uses `news.newsgroup.ninja`, TLS port 563, and 20 connections. See the provider's [connection settings](https://support.newsgroup.ninja/kb/article/515-other-newsreaders/) for regional alternatives and account limits.
 
-### 4. Add Indexers
+## Download clients
 
-- Go to Settings > Indexers
-- Add your Newznab indexers (URL, API key, priority)
-- For torrent indexers (e.g., Rutracker), select the appropriate type and provide credentials
-- Test each indexer to verify connectivity
+Fresh Compose installations are wired automatically. For external clients:
 
-### 5. Create Quality Profile
+- SABnzbd: enter its reachable URL and API key. Use the `mediaforge` category and shared completed/incomplete folders. The app validates authentication rather than relying on the public version endpoint.
+- qBittorrent: enable the connection and enter its reachable Web UI URL and login. Zarr tracks jobs in the `zarr` category with `dl_<id>` tags. Configure the desired save path in qBittorrent. Seed hours control when an imported torrent may be removed; failed imports retain their source data.
 
-- Settings > Quality Profiles > Create
-- Select desired qualities (e.g., remux-1080p, bluray-1080p, web-1080p)
-- Set language preference
-- Configure upgrade policy
-- Add reject patterns (e.g., "cam", "ts", "hdcam")
+Downloads are marked available only after importing files successfully. Cancel stops the downloader and restores wanted state. A failed import is visible as failed and retains source data for diagnosis/retry.
 
-## AI Assistant Setup (Optional)
+## Assistant
 
-### 1. Get OpenRouter API Key
+The default is `moonshotai/kimi-k3` with `high` reasoning. Choose another OpenRouter model ID or reasoning level in Settings. The assistant streams reasoning separately from answer text and preserves opaque provider reasoning details and tool IDs in conversation history. It handles interrupted/error streams explicitly rather than saving an apparently successful empty answer.
 
-- Sign up at https://openrouter.ai
-- Generate an API key
-- Add credits to your account
+Connection testing validates your key. Actual model availability and credits are checked when you chat. Model inference uses your OpenRouter account. See [OpenRouter reasoning documentation](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens) for supported model behavior.
 
-### 2. Configure in Zarr
+## Proxy
 
-- Settings > AI Assistant > OpenRouter API Key
-- Select a model (default: Claude Sonnet 4)
-- Test the connection
+Enter an HTTP(S) or SOCKS5 proxy URL for external APIs. Downloader traffic stays direct on the local network. From Docker Desktop, a proxy on the host's port 7897 is usually `http://host.docker.internal:7897`; `localhost` inside a container refers to that container. Save the proxy before testing external services.
 
-### 3. Optional: Brave Search
+## Quality profiles
 
-- Get API key from https://brave.com/search/api/
-- Add to Settings > AI Assistant > Brave Search API Key
-- Enables web search capability for the AI
+Create or edit profiles for video and music with qualities, language, tag bonuses, reject patterns, and upgrade policy. Zarr supplies initial profiles and selects a suitable default when none is specified. Profiles still assigned to library items cannot be deleted.
 
-## Advanced Settings
+## Environment variables
 
-- **Media Root**: Default `/data/media` — where organized files are stored
-- **Proxy**: Optional HTTP proxy for external API calls
-- **AI Personality**: Customize the assistant's tone and behavior
-- **Custom AI System Prompt**: Fine-tune recommendations logic
+Environment variables remain optional first-run seeds for existing deployment tooling. Once a setting exists in the database, the UI is authoritative, including an explicitly cleared key. Process settings such as `MEDIAFORGE_CONFIG_DIR`, `MEDIAFORGE_PORT`, and `MEDIAFORGE_LOG_LEVEL` remain environment variables.
