@@ -330,26 +330,31 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 	var title, imdbID string
 	var year int
 	var profileID int
-	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
-		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &imdbID, &year, &profileID)
+	var anime bool
+	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0), anime
+		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &imdbID, &year, &profileID, &anime)
 
 	allIndexers := s.loadIndexers()
 
 	// Newznab search
-	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+	newznabIdxs := indexer.MovieIndexers(allIndexers, "newznab", anime)
 	releases := s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
 	for i := range releases {
 		releases[i].DownloadType = "nzb"
 	}
 
 	// Rutracker search
-	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+	rtIndexers := indexer.MovieIndexers(allIndexers, "rutracker", anime)
 	if len(rtIndexers) > 0 {
 		query := title
 		if year > 0 {
 			query = fmt.Sprintf("%s %d", title, year)
 		}
-		rtReleases := s.searchRutracker(rtIndexers, query, "movie")
+		rtContentType := "movie"
+		if anime {
+			rtContentType = "anime"
+		}
+		rtReleases := indexer.FilterMovieReleases(s.searchRutracker(rtIndexers, query, rtContentType), title, year)
 		releases = append(releases, rtReleases...)
 	}
 
@@ -389,7 +394,7 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	var tvdbID, profileID int
 	var anime bool
 	err := s.db.QueryRow(`SELECT title, COALESCE(tvdb_id,0), anime, COALESCE(quality_profile_id,0)
-		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &tvdbID, &anime, &profileID)
+		FROM media_items WHERE id = ? AND type = 'series'`, mediaID).Scan(&title, &tvdbID, &anime, &profileID)
 	if err != nil {
 		return nil, fmt.Errorf("media item not found")
 	}
@@ -415,7 +420,7 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	var releases []indexer.Release
 	if anime && absNum.Valid {
 		titles := []string{title}
-		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64), seasonNum, epNum)
 	} else {
 		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, seasonNum, epNum, title)
 	}
@@ -432,6 +437,11 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 			query = fmt.Sprintf("%s %d", title, absNum.Int64)
 		}
 		rtReleases := s.searchRutracker(rtIndexers, query, contentType)
+		absolute := 0
+		if anime && absNum.Valid {
+			absolute = int(absNum.Int64)
+		}
+		rtReleases = indexer.FilterEpisodeReleases(rtReleases, title, seasonNum, epNum, absolute)
 		releases = append(releases, rtReleases...)
 	}
 

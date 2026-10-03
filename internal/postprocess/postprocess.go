@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"mediaforge/internal/database"
+	"mediaforge/internal/indexer"
 )
 
 type Processor struct {
@@ -86,8 +87,15 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 		if err == nil {
 			if mediaType == "movie" {
 				src := LargestFile(files)
+				if indexer.IsEpisodicRelease(filepath.Base(src)) {
+					return fmt.Errorf("episode file cannot be imported as a movie")
+				}
+				var importedBefore int
+				if err := p.db.QueryRow(`SELECT COUNT(*) FROM downloads WHERE media_item_id=? AND id!=? AND status IN ('imported','seeding')`, mediaID.Int64, downloadID).Scan(&importedBefore); err != nil {
+					return err
+				}
 				dst := MoviePath(p.mediaRoot, title, int(year.Int64), filepath.Ext(src))
-				plan = []importFile{{src: src, dst: dst, replace: libraryRoot.Valid && filepath.Clean(libraryRoot.String) == filepath.Dir(dst)}}
+				plan = []importFile{{src: src, dst: dst, replace: importedBefore > 0 && libraryRoot.Valid && filepath.Clean(libraryRoot.String) == filepath.Dir(dst)}}
 			} else {
 				plan, err = p.episodePlan(int(mediaID.Int64), episodeID, title, int(year.Int64), anime, files)
 			}
@@ -196,8 +204,6 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 
 var episodeNumber = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,3})e(\d{1,4})(?:[^0-9]|$)`)
 var alternateEpisodeNumber = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(\d{1,3})x(\d{1,4})(?:[^0-9]|$)`)
-var absoluteEpisodeNumber = regexp.MustCompile(`(?:^|[ _.-])(?:-\s*)?(\d{1,4})(?:v\d+)?(?:[ _.[(]|$)`)
-var multiEpisodeNumber = regexp.MustCompile(`(?i)s\d+e\d+(?:e|-e?)\d+`)
 
 func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title string, year int, anime bool, files []string) ([]importFile, error) {
 	type episode struct {
@@ -228,7 +234,7 @@ func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title stri
 	var plan []importFile
 	for _, src := range files {
 		name := filepath.Base(src)
-		if multiEpisodeNumber.MatchString(name) {
+		if indexer.IsMultiEpisodeRelease(name) || indexer.HasAbsoluteEpisodeRange(name, title) {
 			return nil, fmt.Errorf("combined episode file requires manual import: %s", name)
 		}
 		match := episodeNumber.FindStringSubmatch(name)
@@ -246,9 +252,12 @@ func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title stri
 				}
 			}
 		} else if anime {
-			// Match absolute numbers only when exactly one known episode number appears.
-			for _, m := range absoluteEpisodeNumber.FindAllStringSubmatch(strings.TrimSuffix(name, filepath.Ext(name)), -1) {
-				n, _ := strconv.Atoi(m[1])
+			n, ok := indexer.AbsoluteEpisodeNumber(strings.TrimSuffix(name, filepath.Ext(name)), title)
+			// Numeric-only files are common inside correctly labelled season packs.
+			if !ok && regexp.MustCompile(`^\d{1,4}(?:v\d+)?(?:[ ._-]|$)`).MatchString(strings.TrimSuffix(name, filepath.Ext(name))) {
+				n, ok = indexer.AbsoluteEpisodeNumber(title+" "+strings.TrimSuffix(name, filepath.Ext(name)), title)
+			}
+			if ok {
 				for i := range episodes {
 					if episodes[i].absolute.Valid && int(episodes[i].absolute.Int64) == n {
 						if selected != nil && selected.id != episodes[i].id {
@@ -259,6 +268,10 @@ func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title stri
 				}
 			}
 		}
+		if selected == nil && indexer.LooksLikeMovie(name, title) {
+			return nil, fmt.Errorf("movie release cannot be imported as an episode: %s", name)
+		}
+
 		if selected == nil && match == nil && len(files) == 1 && requested.Valid {
 			for i := range episodes {
 				if episodes[i].id == int(requested.Int64) {

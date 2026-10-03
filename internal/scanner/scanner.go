@@ -216,7 +216,7 @@ func (s *Scanner) matchEpisode(title string, anime bool, year, season, episode i
 // Match the sanitized on-disk title exactly. LIKE allowed a folder such as
 // "Alien" to mark "Aliens" or a wildcard-containing title as available.
 func (s *Scanner) findMedia(title, kind string, anime bool, year int) (int, error) {
-	rows, err := s.db.Query(`SELECT id,title,year FROM media_items WHERE type=? AND anime=?`, kind, anime)
+	rows, err := s.db.Query(`SELECT id,title,year FROM media_items WHERE type=? AND (type='movie' OR anime=?)`, kind, anime)
 	if err != nil {
 		return 0, err
 	}

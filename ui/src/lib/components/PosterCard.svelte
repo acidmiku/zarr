@@ -8,6 +8,7 @@
 	export let status = '';
 	export let inLibrary = false;
 	export let anime = false;
+	export let mediaType = '';
 	export let href = '';
 </script>
 
@@ -22,7 +23,7 @@
 	<div class="poster">
 		<Artwork src={posterUrl} {title} />{#if rating > 0}<span class="rating"
 				>★ {Number(rating).toFixed(1)}</span
-			>{/if}{#if anime}<span class="anime">ANIME</span>{/if}
+			>{/if}{#if anime}<span class="anime">ANIME{mediaType === 'movie' ? ' MOVIE' : mediaType === 'series' ? ' SERIES' : ''}</span>{/if}
 	</div>
 	<div class="poster-info">
 		<strong>{title}</strong>

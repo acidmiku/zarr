@@ -278,7 +278,7 @@ func (s *Scheduler) checkEpisodeAirDates() {
 		FROM episodes e
 		JOIN seasons s ON e.season_id = s.id
 		JOIN media_items m ON e.media_item_id = m.id
-		WHERE e.status = 'wanted' AND e.air_date <= date('now') AND e.episode_type = 'standard'`)
+		WHERE m.type = 'series' AND e.status = 'wanted' AND e.air_date <= date('now') AND e.episode_type = 'standard'`)
 	if err != nil {
 		slog.Error("episode air date check failed", "error", err)
 		return
@@ -544,7 +544,7 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 	var releases []indexer.Release
 	if anime && absNum.Valid {
 		titles := []string{title}
-		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64), season, episode)
 	} else {
 		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, season, episode, title)
 	}
@@ -567,6 +567,13 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 				continue
 			}
 			for _, r := range results {
+				absolute := 0
+				if anime && absNum.Valid {
+					absolute = int(absNum.Int64)
+				}
+				if !indexer.MatchesSeriesEpisode(r.Title, title, season, episode, absolute) {
+					continue
+				}
 				parsed := indexer.ParseReleaseName(r.Title)
 				releases = append(releases, indexer.Release{
 					Title:        r.Title,
@@ -889,7 +896,7 @@ func (s *Scheduler) retryEpisodeWithNextRelease(mediaItemID, episodeID int) {
 	newznabIdxs := filterIndexersByType(allIndexers, "newznab", contentType)
 	var releases []indexer.Release
 	if anime && absNum.Valid {
-		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, []string{title}, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, []string{title}, int(absNum.Int64), seasonNum, epNum)
 	} else {
 		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, seasonNum, epNum, title)
 	}
@@ -910,6 +917,13 @@ func (s *Scheduler) retryEpisodeWithNextRelease(mediaItemID, episodeID int) {
 				continue
 			}
 			for _, r := range results {
+				absolute := 0
+				if anime && absNum.Valid {
+					absolute = int(absNum.Int64)
+				}
+				if !indexer.MatchesSeriesEpisode(r.Title, title, seasonNum, epNum, absolute) {
+					continue
+				}
 				parsed := indexer.ParseReleaseName(r.Title)
 				releases = append(releases, indexer.Release{
 					Title: r.Title, Size: r.Size, Quality: parsed.Quality, Tags: parsed.Tags,
@@ -950,8 +964,9 @@ func (s *Scheduler) retryMovieWithNextRelease(mediaItemID int) {
 
 	var title, imdbID string
 	var year, profileID int
-	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
-		FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID)
+	var anime bool
+	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0), anime
+		FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID, &anime)
 
 	allIndexers := s.loadIndexers()
 	if len(allIndexers) == 0 {
@@ -962,25 +977,32 @@ func (s *Scheduler) retryMovieWithNextRelease(mediaItemID int) {
 		return
 	}
 
-	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+	newznabIdxs := indexer.MovieIndexers(allIndexers, "newznab", anime)
 	releases := s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
 	for i := range releases {
 		releases[i].DownloadType = "nzb"
 	}
 
-	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+	rtIndexers := indexer.MovieIndexers(allIndexers, "rutracker", anime)
 	if len(rtIndexers) > 0 && s.rtClient != nil {
 		query := title
 		if year > 0 {
 			query = fmt.Sprintf("%s %d", title, year)
 		}
-		forumIDs := rutracker.DefaultForumIDs["movie"]
+		rtContentType := "movie"
+		if anime {
+			rtContentType = "anime"
+		}
+		forumIDs := rutracker.DefaultForumIDs[rtContentType]
 		for _, idx := range rtIndexers {
 			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
 			if err != nil {
 				continue
 			}
 			for _, r := range results {
+				if !indexer.MatchesMovieText(r.Title, title, year) {
+					continue
+				}
 				parsed := indexer.ParseReleaseName(r.Title)
 				releases = append(releases, indexer.Release{
 					Title: r.Title, Size: r.Size, Quality: parsed.Quality, Tags: parsed.Tags,

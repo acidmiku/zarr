@@ -108,7 +108,7 @@ func ToolDefs(braveAvailable bool) []Tool {
 							"type": "object",
 							"properties": {
 								"title": {"type": "string", "description": "Title of the movie/series/anime/album. For music, use 'Artist - Album' format."},
-								"media_type": {"type": "string", "enum": ["movie", "series", "music"], "description": "Type of media. Use 'series' for both TV shows and anime. Use 'music' for albums."},
+								"media_type": {"type": "string", "enum": ["movie", "series", "music"], "description": "Type of media. Use 'movie' for films including anime films, 'series' for TV shows including anime series, and 'music' for albums. Set anime separately."},
 								"score": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Rating 1-5 stars. Default 5 if user doesn't specify. Infer from sentiment: loved=5, great=4, ok=3, meh=2, bad=1."},
 								"comment": {"type": "string", "description": "Optional user comment or note about the title"},
 								"anime": {"type": "boolean", "description": "Whether this is anime. Default false."}

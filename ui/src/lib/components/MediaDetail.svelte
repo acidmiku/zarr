@@ -1,6 +1,7 @@
 <script>
 	import { createEventDispatcher, onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import { mediaTypeLabel } from '$lib/media';
 	import StatusBadge from './StatusBadge.svelte';
 
 	export let item = null;
@@ -27,7 +28,7 @@
 
 	onMount(async () => {
 		// Fetch season info for series in discovery mode
-		if (mode === 'discovery' && item?.tmdb_id && (item.type === 'series' || item.is_anime)) {
+		if (mode === 'discovery' && item?.tmdb_id && item.type === 'series') {
 			try {
 				const meta = await api.metadata(item.tmdb_id, 'series');
 				const seasons = (meta.seasons || []).filter(s => item.is_anime || s.season_number > 0);
@@ -50,7 +51,7 @@
 	async function addToLibrary() {
 		if (adding || loadingSeasons) return;
 		// For TMDB series with potentially multiple seasons, show season picker
-		if (item.tmdb_id && (item.type === 'series' || item.is_anime) && !showSeasonPicker) {
+		if (item.tmdb_id && item.type === 'series' && !showSeasonPicker) {
 			loadingSeasons = true;
 			try {
 				// Use prefetched data if available, otherwise fetch
@@ -142,7 +143,7 @@
 					{#if item.rating}<span class="meta-item rating-val">★ {item.rating?.toFixed(1)}</span>{/if}
 					{#if seasonCount !== null}<span class="meta-item">{seasonCount} season{seasonCount !== 1 ? 's' : ''}</span>{/if}
 					{#if item.status}<StatusBadge status={item.status} />{/if}
-					<span class="media-type-tag">{item.is_anime ? 'Anime' : item.type === 'movie' ? 'Movie' : 'Series'}</span>
+					<span class="media-type-tag">{mediaTypeLabel(item)}</span>
 				</div>
 				{#if genres.length > 0}
 					<div class="genres">

@@ -277,3 +277,81 @@ func TestIncompleteAlbumRetainsSourceForRetry(t *testing.T) {
 		t.Fatal("incomplete album reset for automatic duplicate grab")
 	}
 }
+
+func TestAnimeMovieImportsAsMovieBesideAnimeSeries(t *testing.T) {
+	db := testDB(t)
+	execute(t, db, `INSERT INTO media_items(id,type,title,year,anime) VALUES(1,'series','Chainsaw Man',2022,1),(2,'movie','Chainsaw Man The Movie Reze Arc',2025,1)`)
+	execute(t, db, `INSERT INTO seasons(id,media_item_id,number) VALUES(1,1,1)`)
+	execute(t, db, `INSERT INTO episodes(id,season_id,media_item_id,number,absolute_number,title) VALUES(1,1,1,1,1,'Dog and Chainsaw')`)
+	execute(t, db, `INSERT INTO downloads(id,media_item_id,nzb_title,status) VALUES(1,2,'Reze Arc','completed')`)
+	src := filepath.Join(t.TempDir(), "Chainsaw.Man.The.Movie.Reze.Arc.2025.1080p.mkv")
+	writeMedia(t, src, "movie")
+	root := t.TempDir()
+	if err := New(db, root, "").Process(1, src); err != nil {
+		t.Fatal(err)
+	}
+	var movieRoot, episodeStatus string
+	db.QueryRow(`SELECT root_path FROM media_items WHERE id=2`).Scan(&movieRoot)
+	db.QueryRow(`SELECT status FROM episodes WHERE id=1`).Scan(&episodeStatus)
+	if !strings.Contains(movieRoot, string(filepath.Separator)+"movies"+string(filepath.Separator)) || episodeStatus != "wanted" {
+		t.Fatalf("movie root=%s series episode=%s", movieRoot, episodeStatus)
+	}
+}
+func TestAnimeEpisodeImportRejectsRezeArcMovie(t *testing.T) {
+	db := testDB(t)
+	execute(t, db, `INSERT INTO media_items(id,type,title,year,anime) VALUES(1,'series','Chainsaw Man',2022,1)`)
+	execute(t, db, `INSERT INTO seasons(id,media_item_id,number) VALUES(1,1,1)`)
+	execute(t, db, `INSERT INTO episodes(id,season_id,media_item_id,number,absolute_number,title) VALUES(1,1,1,1,1,'Dog and Chainsaw')`)
+	execute(t, db, `INSERT INTO downloads(id,media_item_id,episode_id,nzb_title,status) VALUES(1,1,1,'wrong release','completed')`)
+	src := filepath.Join(t.TempDir(), "Chainsaw.Man.The.Movie.Reze.Arc.2025.1080p.DDP5.1.mkv")
+	writeMedia(t, src, "keep movie")
+	if err := New(db, t.TempDir(), "").Process(1, src); err == nil {
+		t.Fatal("movie imported as episode 1")
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatal("mismatched movie source removed")
+	}
+}
+func TestMovieImportRejectsEpisodeAndUntrackedLegacyRoot(t *testing.T) {
+	db := testDB(t)
+	root := t.TempDir()
+	destination := MoviePath(root, "Movie", 2025, ".mkv")
+	execute(t, db, `INSERT INTO media_items(id,type,title,year,root_path) VALUES(1,'movie','Movie',2025,?)`, filepath.Dir(destination))
+	execute(t, db, `INSERT INTO downloads(id,media_item_id,nzb_title,status) VALUES(1,1,'movie','completed')`)
+	source := filepath.Join(t.TempDir(), "Movie.S01E01.mkv")
+	writeMedia(t, source, "episode")
+	p := New(db, root, "")
+	if err := p.Process(1, source); err == nil {
+		t.Fatal("episode accepted for movie")
+	}
+	writeMedia(t, destination, "untracked canonical file")
+	source = filepath.Join(t.TempDir(), "Movie.2025.mkv")
+	writeMedia(t, source, "replacement")
+	if err := p.Process(1, source); err == nil {
+		t.Fatal("legacy root_path incorrectly proved tracked ownership")
+	}
+	body, _ := os.ReadFile(destination)
+	if string(body) != "untracked canonical file" {
+		t.Fatal("untracked file overwritten")
+	}
+}
+
+func TestEpisodeRangeCannotUseSingleFileFallback(t *testing.T) {
+	for _, name := range []string{"Chainsaw Man - 01-02.mkv", "Chainsaw Man - 01v2-03.mkv", "Chainsaw Man S01E01E02.mkv", "Chainsaw Man 1x01-02.mkv"} {
+		t.Run(name, func(t *testing.T) {
+			db := testDB(t)
+			execute(t, db, `INSERT INTO media_items(id,type,title,anime) VALUES(1,'series','Chainsaw Man',1)`)
+			execute(t, db, `INSERT INTO seasons(id,media_item_id,number) VALUES(1,1,1)`)
+			execute(t, db, `INSERT INTO episodes(id,season_id,media_item_id,number,absolute_number) VALUES(1,1,1,1,1)`)
+			execute(t, db, `INSERT INTO downloads(id,media_item_id,episode_id,nzb_title) VALUES(1,1,1,'pack')`)
+			src := filepath.Join(t.TempDir(), name)
+			writeMedia(t, src, "retain combined episodes")
+			if err := New(db, t.TempDir(), "").Process(1, src); err == nil {
+				t.Fatal("combined episodes incorrectly assigned to episode1")
+			}
+			if _, err := os.Stat(src); err != nil {
+				t.Fatal("combined source lost")
+			}
+		})
+	}
+}

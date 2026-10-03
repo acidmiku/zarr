@@ -34,11 +34,10 @@
 }
 .connection-settings label,
 .connection-section label {
-	display: flex;
-	flex-direction: column;
-	gap: 0.4rem;
+	display: block;
 	color: var(--text-secondary);
 	font-size: 0.85rem;
+	line-height: 1.5;
 	min-width: 0;
 }
 .connection-settings input:not([type='checkbox']),
@@ -46,14 +45,21 @@
 .connection-settings textarea,
 .connection-section input:not([type='checkbox']),
 .connection-section select {
+	display: block;
 	width: 100%;
 	min-width: 0;
+	min-height: 2.75rem;
+	margin-top: 0.4rem;
 	padding: 0.7rem 0.8rem;
 	border: 1px solid var(--glass-border);
 	border-radius: var(--radius-sm);
 	background: var(--bg-input);
 	color: var(--text-primary);
 	font: inherit;
+}
+.connection-grid label > .connection-hint {
+	display: block;
+	margin-top: 0.4rem;
 }
 .connection-settings input:focus,
 .connection-settings select:focus,
@@ -65,6 +71,7 @@
 }
 .connection-settings .connection-check,
 .connection-section .connection-check {
+	display: flex;
 	flex-direction: row;
 	align-items: center;
 	gap: 0.5rem;

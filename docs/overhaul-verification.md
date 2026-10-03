@@ -26,6 +26,17 @@ This change builds on PR #1's Neon Archive interface. Three agents implemented a
 - **144 simultaneous/batched live API operations** across Settings, profiles, indexers, and library returned success after the SQLite initialization fix.
 - Compared tracked/new source files against all five supplied credential values: no matches. Runtime data, downloaded source references, temporary logs, and local test files remain excluded from Git and image context.
 
+## Follow-up verification on 2026-10-04
+
+- Fixed Settings control alignment, checked at 1440, 1024, 768, 390 and 320 pixels with saved and empty credentials.
+- All **31 Playwright tests** passed; the strengthened mixed-result recommendation test also passed after review. Full Go race suite and `go vet ./...` passed after the backend changes.
+- Rebuilt and restarted the production Docker app. Live Anime search returns **Chainsaw Man (2022), TMDB 114410, series** and **Chainsaw Man - The Movie: Reze Arc (2025), TMDB 1218925, movie**. Both metadata endpoints preserve anime classification; the film has no seasons field.
+- Regression coverage exercises mixed movie/TV discovery, TMDB namespace collisions, TMDB/AniList additions, movie imports/scans, anime-only indexers across manual and scheduled searches, recommendation selection, movie/episode release separation, BD source aliases and combined-episode source retention.
+- No Chainsaw Man media was downloaded. Search and metadata checks used live TMDB; library creation, download routing and imports used isolated test fixtures.
+- [TRaSH anime scoring audit](anime-quality-audit.md) documents current gaps, including group tiers, quality grouping, subtitle certainty and automatic upgrades. This pass does not claim TRaSH scoring parity.
+
+![Settings fields aligned](images/settings-alignment.jpg)
+
 ## Scope limits
 
 No full Usenet media payload was downloaded, and no external torrent swarm was used. Those network transfer paths are covered by authenticated live checks plus mocked lifecycle/import regression tests. Rutracker scraping was not exercised against a real account. Combined multi-episode files that cannot be matched safely fail explicitly for manual handling and keep their source. This application remains a single-user local service; web ports bind to localhost by default.

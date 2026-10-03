@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -254,7 +253,7 @@ func (c *NewznabClient) SearchMovie(indexers []IndexerConfig, imdbID, title stri
 		}
 
 		for _, item := range items {
-			if textSearch && !matchesMovieText(item.Title, title, year) {
+			if IsEpisodicRelease(item.Title) || (textSearch && !MatchesMovieText(item.Title, title, year)) {
 				continue
 			}
 			parsed := ParseReleaseName(item.Title)
@@ -283,12 +282,14 @@ func (c *NewznabClient) SearchEpisode(indexers []IndexerConfig, tvdbID, season, 
 
 		var items []NewznabItem
 		var err error
+		textSearch := false
 
 		// Try TVDB search first
 		if tvdbID > 0 {
 			items, err = c.SearchTVByTVDB(idx, tvdbID, season, episode)
 		}
 		if err != nil || len(items) == 0 {
+			textSearch = true
 			// Fallback to text search
 			query := fmt.Sprintf("%s S%02dE%02d", title, season, episode)
 			items, err = c.SearchTVByText(idx, query)
@@ -299,7 +300,7 @@ func (c *NewznabClient) SearchEpisode(indexers []IndexerConfig, tvdbID, season, 
 		}
 
 		for _, item := range items {
-			if !MatchesEpisode(item.Title, season, episode) {
+			if !MatchesEpisode(item.Title, season, episode) || (textSearch && !MatchesSeriesEpisode(item.Title, title, season, episode, 0)) {
 				continue
 			}
 			parsed := ParseReleaseName(item.Title)
@@ -379,7 +380,7 @@ func (c *NewznabClient) SearchMusic(indexers []IndexerConfig, artist, album stri
 }
 
 // SearchAnimeEpisode searches all indexers for an anime episode using absolute numbering.
-func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []string, absoluteNum int) []Release {
+func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []string, absoluteNum int, seasonEpisode ...int) []Release {
 	var allReleases []Release
 
 	for _, idx := range indexers {
@@ -396,7 +397,11 @@ func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []st
 			}
 
 			for _, item := range items {
-				if !MatchesAbsoluteEpisode(item.Title, title, absoluteNum) {
+				matches := MatchesAbsoluteEpisode(item.Title, title, absoluteNum)
+				if len(seasonEpisode) == 2 {
+					matches = MatchesSeriesEpisode(item.Title, title, seasonEpisode[0], seasonEpisode[1], absoluteNum)
+				}
+				if !matches {
 					continue
 				}
 				parsed := ParseReleaseName(item.Title)
@@ -413,44 +418,4 @@ func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []st
 	}
 
 	return allReleases
-}
-
-var episodeToken = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,3})e(\d{1,4})(?:[^0-9]|$)`)
-
-func MatchesEpisode(name string, season, episode int) bool {
-	m := episodeToken.FindStringSubmatch(name)
-	if m == nil {
-		return false
-	}
-	s, _ := strconv.Atoi(m[1])
-	e, _ := strconv.Atoi(m[2])
-	return s == season && e == episode
-}
-func MatchesAbsoluteEpisode(name, title string, number int) bool {
-	normalized := strings.NewReplacer(".", " ", "_", " ").Replace(strings.ToLower(name))
-	normalizedTitle := strings.NewReplacer(".", " ", "_", " ").Replace(strings.ToLower(title))
-	pos := strings.Index(normalized, normalizedTitle)
-	if pos < 0 {
-		return false
-	}
-	tail := normalized[pos+len(normalizedTitle):]
-	pattern := regexp.MustCompile(fmt.Sprintf(`(?:^|[^0-9a-z])0*%d(?:v\d+)?(?:[^0-9a-z]|$)`, number))
-	return pattern.MatchString(tail)
-}
-
-var titleSeparators = regexp.MustCompile(`[^\pL\pN]+`)
-
-func matchesMovieText(name, title string, year int) bool {
-	normalize := func(s string) string {
-		return strings.TrimSpace(titleSeparators.ReplaceAllString(strings.ToLower(s), " "))
-	}
-	normalized := normalize(name)
-	wanted := normalize(title)
-	if wanted == "" || !strings.Contains(" "+normalized+" ", " "+wanted+" ") {
-		return false
-	}
-	if year > 0 && !regexp.MustCompile(fmt.Sprintf(`(?:^|[^0-9])%d(?:[^0-9]|$)`, year)).MatchString(name) {
-		return false
-	}
-	return true
 }

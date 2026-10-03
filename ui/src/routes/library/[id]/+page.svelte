@@ -278,7 +278,7 @@
 							</span>
 						{/if}
 						<StatusBadge status={item.status} />
-						{#if item.anime}<span class="anime-tag">ANIME</span>{/if}
+						{#if item.anime}<span class="anime-tag">ANIME {item.type === 'movie' ? 'MOVIE' : 'SERIES'}</span>{/if}
 					</div>
 					{#if genresArr.length > 0}
 						<div class="genres">

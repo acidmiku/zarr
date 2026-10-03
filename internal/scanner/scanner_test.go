@@ -25,3 +25,17 @@ func TestScannerMatchesExactSanitizedTitlesAndYear(t *testing.T) {
 		t.Fatal("ambiguous remake matched arbitrarily")
 	}
 }
+
+func TestScannerMovieTypeIncludesAnimeMovies(t *testing.T) {
+	db, err := database.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.Exec(`INSERT INTO media_items(id,type,title,year,anime) VALUES(1,'series','Chainsaw Man',2022,1),(2,'movie','Chainsaw Man The Movie Reze Arc',2025,1)`)
+	s := New(db, t.TempDir())
+	id, err := s.findMedia("Chainsaw Man The Movie Reze Arc", "movie", false, 2025)
+	if err != nil || id != 2 {
+		t.Fatalf("anime movie wasn't scanned as movie: %d %v", id, err)
+	}
+}

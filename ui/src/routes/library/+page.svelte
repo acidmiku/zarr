@@ -168,6 +168,7 @@
 						status={item.status}
 						inLibrary
 						anime={item.anime}
+						mediaType={item.type}
 					/>{/each}
 			</div>{/if}
 		{#if dashboard}
@@ -235,6 +236,7 @@
 								status={item.status}
 								inLibrary
 								anime={item.anime}
+								mediaType={item.type}
 							/>{/each}
 					</div>
 				</section>{/if}

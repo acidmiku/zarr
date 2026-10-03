@@ -2,7 +2,9 @@ package scheduler
 
 import (
 	"encoding/json"
+	"io"
 	"mediaforge/internal/database"
+	"mediaforge/internal/indexer"
 	"mediaforge/internal/postprocess"
 	"mediaforge/internal/qbt"
 	"net/http"
@@ -103,5 +105,30 @@ func TestExtractDownloadIDRequiresExactPositiveTag(t *testing.T) {
 		if got := extractDownloadID(input); got != want {
 			t.Errorf("%q = %d", input, got)
 		}
+	}
+}
+
+func TestAnimeMovieRetryUsesAnimeOnlyIndexerWithMovieAPI(t *testing.T) {
+	db := testSchedulerDB(t)
+	calls := 0
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("t") == "movie" {
+			calls++
+			if r.URL.Query().Get("imdbid") != "1234567" {
+				t.Error("IMDb movie identity lost")
+			}
+		}
+		if r.URL.Query().Get("t") == "tvsearch" {
+			t.Error("anime film routed to episode search")
+		}
+		io.WriteString(w, `<rss><channel></channel></rss>`)
+	}))
+	defer remote.Close()
+	db.Exec(`INSERT INTO media_items(id,type,title,year,anime,imdb_id,quality_profile_id) VALUES(1,'movie','Chainsaw Man The Movie Reze Arc',2025,1,'tt1234567',2)`)
+	db.Exec(`INSERT INTO indexers(name,url,api_key,type,content_types) VALUES('Anime only',?,'test','newznab','["anime"]')`, remote.URL)
+	s := &Scheduler{db: db, newznab: indexer.NewNewznabClient(remote.Client())}
+	s.retryMovieWithNextRelease(1)
+	if calls != 1 {
+		t.Fatalf("typed movie searches=%d", calls)
 	}
 }

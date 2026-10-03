@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"mediaforge/internal/indexer"
 	"mediaforge/internal/metadata"
 	"mediaforge/internal/postprocess"
 )
@@ -550,9 +551,9 @@ func (s *Server) importMovie(item importItem) importResult {
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT INTO media_items
-		(type, title, year, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path, status)
-		VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?, 'available')`,
-		movie.Title, year, movie.ID, movie.IMDbID,
+		(type, title, year, anime, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path, status)
+		VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?, 'available')`,
+		movie.Title, year, s.tmdb.IsAnimeMovie(movie), movie.ID, movie.IMDbID,
 		movie.Overview,
 		metadata.PosterURL(movie.PosterPath),
 		metadata.BackdropURL(movie.BackdropPath),
@@ -641,9 +642,8 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 		return res
 	}
 
-	// Parse episodes from filenames
-	epPattern := regexp.MustCompile(`(?i)S(\d{1,2})E(\d{1,3})`)
-
+	// Parse episodes before writing anything. A combined file cannot safely be
+	// assigned to only its first episode, including in an otherwise valid folder.
 	type parsedEpisode struct {
 		file    string
 		season  int
@@ -651,18 +651,22 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 	}
 	var episodes []parsedEpisode
 	for _, f := range videoFiles {
-		match := epPattern.FindStringSubmatch(filepath.Base(f))
-		if match == nil {
+		name := filepath.Base(f)
+		if indexer.IsMultiEpisodeRelease(name) || indexer.HasAbsoluteEpisodeRange(name, tv.Name) {
+			res.Status = "error"
+			res.Message = "combined episode files are not supported: " + name
+			return res
+		}
+		season, episode, ok := indexer.EpisodeNumbers(name)
+		if !ok {
 			continue
 		}
-		s, _ := strconv.Atoi(match[1])
-		e, _ := strconv.Atoi(match[2])
-		episodes = append(episodes, parsedEpisode{file: f, season: s, episode: e})
+		episodes = append(episodes, parsedEpisode{file: f, season: season, episode: episode})
 	}
 
 	if len(episodes) == 0 {
 		res.Status = "error"
-		res.Message = "no episodes detected (expected SxxExx pattern)"
+		res.Message = "no episodes detected (expected SxxExx or 1x01 pattern)"
 		return res
 	}
 

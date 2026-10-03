@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"mediaforge/internal/postprocess"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -82,16 +81,15 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 		genresJSON, _ := json.Marshal(genres)
 
 		result, err := s.db.Exec(`INSERT INTO media_items
-			(type, title, year, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path)
-			VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?)`,
-			movie.Title, year, movie.ID, movie.IMDbID,
+			(type, title, year, anime, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id)
+			VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?)`,
+			movie.Title, year, req.Anime || s.tmdb.IsAnimeMovie(movie), movie.ID, movie.IMDbID,
 			movie.Overview,
 			metadata.PosterURL(movie.PosterPath),
 			metadata.BackdropURL(movie.BackdropPath),
 			string(genresJSON),
 			movie.VoteAverage,
 			req.QualityProfileID,
-			filepath.Dir(postprocess.MoviePath(s.cfg.MediaRoot, movie.Title, year, ".mkv")),
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
@@ -216,6 +214,10 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 	}
 
 	title := media.DisplayTitle()
+	mediaType := "series"
+	if strings.EqualFold(media.Format, "MOVIE") {
+		mediaType = "movie"
+	}
 
 	genres, _ := json.Marshal(media.Genres)
 	var tagNames []string
@@ -234,8 +236,8 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT INTO media_items
 		(type, title, year, anime, anilist_id, overview, poster_url, backdrop_url, genres, tags, rating, rating_source, quality_profile_id)
-		VALUES ('series', ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, 'anilist', ?)`,
-		title, media.StartDate.Year,
+		VALUES (?, ?, ?, TRUE, ?, ?, ?, ?, ?, ?, ?, 'anilist', ?)`,
+		mediaType, title, media.StartDate.Year,
 		media.ID, media.Description,
 		media.CoverImage.ExtraLarge, media.BannerImage,
 		string(genres), string(tagsJSON),
@@ -253,7 +255,7 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 
 	mediaID, _ := result.LastInsertId()
 
-	if media.Episodes > 0 {
+	if mediaType == "series" && media.Episodes > 0 {
 		result, err := tx.Exec(`INSERT INTO seasons (media_item_id,number,title) VALUES (?,1,'Season 1')`, mediaID)
 		if err != nil {
 			writeError(w, 500, "failed to save season")

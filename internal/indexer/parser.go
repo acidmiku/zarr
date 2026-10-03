@@ -19,8 +19,8 @@ var qualityPatterns = []struct {
 }{
 	{"remux-2160p", regexp.MustCompile(`(?i)(remux.*2160p|2160p.*remux)`), nil},
 	{"remux-1080p", regexp.MustCompile(`(?i)(remux.*1080p|1080p.*remux)`), nil},
-	{"bluray-2160p", regexp.MustCompile(`(?i)(blu.?ray.*2160p|2160p.*blu.?ray)`), regexp.MustCompile(`(?i)remux`)},
-	{"bluray-1080p", regexp.MustCompile(`(?i)(blu.?ray.*1080p|1080p.*blu.?ray)`), regexp.MustCompile(`(?i)remux`)},
+	{"bluray-2160p", regexp.MustCompile(`(?i)(\b(?:blu[ ._-]?ray|bd(?:rip)?)\b.*2160p|2160p.*\b(?:blu[ ._-]?ray|bd(?:rip)?)\b)`), regexp.MustCompile(`(?i)remux`)},
+	{"bluray-1080p", regexp.MustCompile(`(?i)(\b(?:blu[ ._-]?ray|bd(?:rip)?)\b.*1080p|1080p.*\b(?:blu[ ._-]?ray|bd(?:rip)?)\b)`), regexp.MustCompile(`(?i)remux`)},
 	{"web-2160p", regexp.MustCompile(`(?i)(web.?dl.*2160p|2160p.*web.?dl|web.?rip.*2160p|webrip.*2160p|2160p.*web.?rip)`), nil},
 	{"web-1080p", regexp.MustCompile(`(?i)(web.?dl.*1080p|1080p.*web.?dl|web.?rip.*1080p|webrip.*1080p|1080p.*web.?rip|1080p.*web)`), nil},
 	{"web-720p", regexp.MustCompile(`(?i)(web.?dl.*720p|720p.*web.?dl|web.?rip.*720p|720p.*web)`), nil},
@@ -73,11 +73,14 @@ var langPatterns = struct {
 // ParseReleaseName extracts quality and tags from a release name.
 func ParseReleaseName(name string) ParsedRelease {
 	result := ParsedRelease{}
+	// Underscores are release separators, but regexp word boundaries treat
+	// them as word characters. Normalize them before source/resolution parsing.
+	qualityName := strings.ReplaceAll(name, "_", " ")
 
 	// Detect quality
 	for _, qp := range qualityPatterns {
-		if qp.Pattern.MatchString(name) {
-			if qp.Reject != nil && qp.Reject.MatchString(name) {
+		if qp.Pattern.MatchString(qualityName) {
+			if qp.Reject != nil && qp.Reject.MatchString(qualityName) {
 				continue
 			}
 			result.Quality = qp.Name
@@ -88,7 +91,7 @@ func ParseReleaseName(name string) ParsedRelease {
 	// Fallback: if no specific source+resolution matched, check resolution alone
 	if result.Quality == "" {
 		for _, fallback := range fallbackResolution {
-			if fallback.Pattern.MatchString(name) {
+			if fallback.Pattern.MatchString(qualityName) {
 				result.Quality = fallback.Quality
 				break
 			}

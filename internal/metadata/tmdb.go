@@ -29,48 +29,52 @@ type TMDBSearchResult struct {
 }
 
 type TMDBMediaEntry struct {
-	ID            int      `json:"id"`
-	Title         string   `json:"title"` // movies
-	Name          string   `json:"name"`  // tv
-	OriginalTitle string   `json:"original_title"`
-	OriginalName  string   `json:"original_name"`
-	Overview      string   `json:"overview"`
-	PosterPath    string   `json:"poster_path"`
-	BackdropPath  string   `json:"backdrop_path"`
-	ReleaseDate   string   `json:"release_date"`   // movies
-	FirstAirDate  string   `json:"first_air_date"` // tv
-	GenreIDs      []int    `json:"genre_ids"`
-	VoteAverage   float64  `json:"vote_average"`
-	OriginCountry []string `json:"origin_country"`
-	MediaType     string   `json:"media_type"`
+	ID               int      `json:"id"`
+	Title            string   `json:"title"` // movies
+	Name             string   `json:"name"`  // tv
+	OriginalTitle    string   `json:"original_title"`
+	OriginalName     string   `json:"original_name"`
+	Overview         string   `json:"overview"`
+	PosterPath       string   `json:"poster_path"`
+	BackdropPath     string   `json:"backdrop_path"`
+	ReleaseDate      string   `json:"release_date"`   // movies
+	FirstAirDate     string   `json:"first_air_date"` // tv
+	GenreIDs         []int    `json:"genre_ids"`
+	VoteAverage      float64  `json:"vote_average"`
+	OriginCountry    []string `json:"origin_country"`
+	OriginalLanguage string   `json:"original_language"`
+	MediaType        string   `json:"media_type"`
 }
 
 type TMDBMovieDetail struct {
-	ID           int         `json:"id"`
-	Title        string      `json:"title"`
-	Overview     string      `json:"overview"`
-	PosterPath   string      `json:"poster_path"`
-	BackdropPath string      `json:"backdrop_path"`
-	ReleaseDate  string      `json:"release_date"`
-	Genres       []TMDBGenre `json:"genres"`
-	VoteAverage  float64     `json:"vote_average"`
-	IMDbID       string      `json:"imdb_id"`
-	Runtime      int         `json:"runtime"`
+	ID               int         `json:"id"`
+	Title            string      `json:"title"`
+	Overview         string      `json:"overview"`
+	PosterPath       string      `json:"poster_path"`
+	BackdropPath     string      `json:"backdrop_path"`
+	ReleaseDate      string      `json:"release_date"`
+	Genres           []TMDBGenre `json:"genres"`
+	VoteAverage      float64     `json:"vote_average"`
+	IMDbID           string      `json:"imdb_id"`
+	Runtime          int         `json:"runtime"`
+	OriginCountry    []string    `json:"origin_country"`
+	OriginalLanguage string      `json:"original_language"`
 }
 
 type TMDBTVDetail struct {
-	ID              int          `json:"id"`
-	Name            string       `json:"name"`
-	Overview        string       `json:"overview"`
-	PosterPath      string       `json:"poster_path"`
-	BackdropPath    string       `json:"backdrop_path"`
-	FirstAirDate    string       `json:"first_air_date"`
-	Genres          []TMDBGenre  `json:"genres"`
-	VoteAverage     float64      `json:"vote_average"`
-	OriginCountry   []string     `json:"origin_country"`
-	Seasons         []TMDBSeason `json:"seasons"`
-	ExternalIDs     TMDBExtIDs   `json:"external_ids"`
-	NumberOfSeasons int          `json:"number_of_seasons"`
+	ID               int          `json:"id"`
+	Name             string       `json:"name"`
+	Overview         string       `json:"overview"`
+	PosterPath       string       `json:"poster_path"`
+	BackdropPath     string       `json:"backdrop_path"`
+	FirstAirDate     string       `json:"first_air_date"`
+	Genres           []TMDBGenre  `json:"genres"`
+	VoteAverage      float64      `json:"vote_average"`
+	OriginCountry    []string     `json:"origin_country"`
+	OriginalLanguage string       `json:"original_language"`
+	Seasons          []TMDBSeason `json:"seasons"`
+	ExternalIDs      TMDBExtIDs   `json:"external_ids"`
+	NumberOfSeasons  int          `json:"number_of_seasons"`
 }
 
 type TMDBGenre struct {
@@ -164,11 +168,18 @@ func (c *TMDBClient) DiscoverAnimeTV(page int) (*TMDBSearchResult, error) {
 	return tmdbGet[TMDBSearchResult](c.client, u)
 }
 
-// IsAnime checks if a TMDB TV show is likely anime.
-func (c *TMDBClient) IsAnime(detail *TMDBTVDetail) bool {
+func (c *TMDBClient) DiscoverAnimeMovies(page int) (*TMDBSearchResult, error) {
+	u := fmt.Sprintf("%s/discover/movie?api_key=%s&with_genres=16&with_origin_country=JP&include_adult=false&sort_by=popularity.desc&page=%d",
+		tmdbBase, url.QueryEscape(c.apiKey), page)
+	return tmdbGet[TMDBSearchResult](c.client, u)
+}
+
+// IsAnimeEntry uses language only when origin is unavailable, as in movie
+// search responses. An explicit non-Japanese origin must not be overridden.
+func IsAnimeEntry(entry TMDBMediaEntry) bool {
 	hasAnimation := false
-	for _, g := range detail.Genres {
-		if g.Name == "Animation" {
+	for _, genreID := range entry.GenreIDs {
+		if genreID == 16 {
 			hasAnimation = true
 			break
 		}
@@ -176,12 +187,28 @@ func (c *TMDBClient) IsAnime(detail *TMDBTVDetail) bool {
 	if !hasAnimation {
 		return false
 	}
-	for _, country := range detail.OriginCountry {
-		if strings.ToUpper(country) == "JP" {
+	for _, country := range entry.OriginCountry {
+		if strings.EqualFold(country, "JP") {
 			return true
 		}
 	}
-	return false
+	return len(entry.OriginCountry) == 0 && strings.EqualFold(entry.OriginalLanguage, "ja")
+}
+
+func animeDetail(genres []TMDBGenre, countries []string, language string) bool {
+	entry := TMDBMediaEntry{OriginCountry: countries, OriginalLanguage: language}
+	for _, genre := range genres {
+		entry.GenreIDs = append(entry.GenreIDs, genre.ID)
+	}
+	return IsAnimeEntry(entry)
+}
+
+func (c *TMDBClient) IsAnime(detail *TMDBTVDetail) bool {
+	return detail != nil && animeDetail(detail.Genres, detail.OriginCountry, detail.OriginalLanguage)
+}
+
+func (c *TMDBClient) IsAnimeMovie(detail *TMDBMovieDetail) bool {
+	return detail != nil && animeDetail(detail.Genres, detail.OriginCountry, detail.OriginalLanguage)
 }
 
 func PosterURL(path string) string {

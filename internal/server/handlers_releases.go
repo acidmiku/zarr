@@ -45,24 +45,29 @@ func (s *Server) handleSearchReleases(w http.ResponseWriter, r *http.Request) {
 			// Movie search
 			var title, imdbID string
 			var year, profileID int
-			s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
-				FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID)
+			var anime bool
+			s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0), anime
+				FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID, &anime)
 
 			allIndexers := s.loadIndexers()
 
-			newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+			newznabIdxs := indexer.MovieIndexers(allIndexers, "newznab", anime)
 			releases = s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
 			for i := range releases {
 				releases[i].DownloadType = "nzb"
 			}
 
-			rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+			rtIndexers := indexer.MovieIndexers(allIndexers, "rutracker", anime)
 			if len(rtIndexers) > 0 {
 				query := title
 				if year > 0 {
 					query = fmt.Sprintf("%s %d", title, year)
 				}
-				rtReleases := s.searchRutracker(rtIndexers, query, "movie")
+				rtContentType := "movie"
+				if anime {
+					rtContentType = "anime"
+				}
+				rtReleases := indexer.FilterMovieReleases(s.searchRutracker(rtIndexers, query, rtContentType), title, year)
 				releases = append(releases, rtReleases...)
 			}
 
