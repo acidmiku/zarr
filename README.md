@@ -2,15 +2,18 @@
 
 **Self-hosted media library manager for movies, TV series, anime, and music.**
 
-Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr, Radarr, Prowlarr, etc.) with a single, unified application. It handles everything from discovery and searching to downloading and organizing your media library.
+Zarr brings discovery, release selection, download tracking, and library organization into one application. It uses SABnzbd for Usenet transfers and qBittorrent for torrents, with connections managed from the web UI.
 
 ## Changelog
 
-### Unreleased — Neon Archive
+### Unreleased — Neon Archive and core overhaul
 
 - New Neon Archive interface with a unified collection dashboard, responsive navigation, and live download panels.
+- Quick start without mandatory keys, UI-managed connections and Usenet providers, and automatic setup of the bundled download clients.
+- Recoverable imports and upgrades, safer retries/cancellation, preserved torrent seed files, and fixes to library, scanner, and assistant workflows.
+- Anime films and series remain distinct across discovery, recommendations, imports, and release searches.
 - Separate [TRaSH-based anime movie and series profiles](docs/anime-quality-profiles.md), with grouped qualities, custom formats, score explanations, and safe automatic upgrades.
-- [Screenshots and local verification](docs/neon-archive.md) · [Full changelog](CHANGELOG.md)
+- [Full changelog](CHANGELOG.md) · [Verification and known limits](docs/overhaul-verification.md) · [UI screenshots](docs/neon-archive.md)
 
 
 ### v0.2.0 (2026-03-02)
@@ -26,7 +29,7 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 - Initial release with movies, TV series, and anime management
 - Usenet downloading via SABnzbd with automatic post-processing
 - AI assistant with personalized recommendations via OpenRouter
-- Quality profiles with release scoring and automatic upgrades
+- Quality profiles with release scoring
 - Personal ratings and review system
 - Obsidian Glass design with dark and light themes
 
@@ -36,9 +39,11 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 - **Smart Discovery** — Trending content, search across TMDB, AniList, and MusicBrainz
 - **Dual Download** — Usenet (SABnzbd) and torrent (qBittorrent) support
 - **Multi-Indexer** — Newznab and Rutracker with priority management
+- **UI-managed Connections** — Metadata and AI keys, download clients, indexers, Usenet providers, and proxies in Settings
 - **Release Scoring** — Quality profiles, best release selection, and automatic upgrades for the TRaSH anime presets
-- **AI Assistant** — Personalized recommendations via OpenRouter (Claude, GPT-4, etc.)
+- **AI Assistant** — OpenRouter recommendations with configurable models, streamed reasoning, and tool history; Kimi K3/high reasoning by default
 - **Music Support** — Artist/album management with MusicBrainz and Last.fm metadata
+- **Existing Libraries** — Import files with metadata matching and reconcile organized media through library scans
 - **6 Themes** — Obsidian, Ember, Violet (dark) + Light, Rose, Mint (light)
 - **Ratings** — Personal 1-5 star ratings with persistent metadata
 - **Activity Tracking** — Complete history, download queue, real-time progress
@@ -65,14 +70,18 @@ docker compose up -d --build
 
 Open [Zarr](http://localhost:9876). Add connections in Quick start or open the library immediately. The bundled downloaders receive generated credentials automatically; provider keys, indexers, Usenet servers, and AI settings are managed in the UI. No `.env` editing is required.
 
+Existing installation? Follow the [upgrade notes](docs/installation.md#storage-and-upgrades). Saved connections, custom profiles, and library assignments are preserved. New anime additions use the matching TRaSH preset; existing titles opt in by changing their quality profile. This is a single-user local service; see [installation](docs/installation.md) before exposing it beyond localhost.
+
 ## Documentation
 
 | Section | Description |
 |---------|-------------|
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, directory structure |
 | [Configuration](docs/configuration.md) | TMDB, SABnzbd, qBittorrent, indexers, quality profiles, AI setup |
+| [Anime quality profiles](docs/anime-quality-profiles.md) | TRaSH presets, scoring, dual audio, upgrades, and compatibility limits |
 | [Usage](docs/usage.md) | Adding content, library management, music, AI assistant, ratings |
 | [Development](docs/development.md) | Building from source, project structure, migrations, API routes |
+| [Verification](docs/overhaul-verification.md) | Automated tests, live checks, and untested network paths |
 | [Troubleshooting](docs/troubleshooting.md) | Common issues, performance tips, security notes |
 | [Contributing Indexers](docs/contributing-indexers.md) | How to add new torrent indexer integrations |
 
@@ -81,7 +90,6 @@ Open [Zarr](http://localhost:9876). Add connections in Quick start or open the l
 - [ ] Multi-user support with authentication
 - [ ] Plex/Jellyfin/Emby library sync
 - [ ] Custom metadata editing
-- [ ] Import existing library (scan existing files)
 - [ ] Subtitle management
 - [ ] Mobile app
 
