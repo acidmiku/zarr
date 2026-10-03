@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes after the overhaul
+
+- Fix title and album removal after cancelling a download: cancelled jobs are no longer sent to the downloader a second time. Repeated cancellation succeeds locally, and removal retries remember transfers already cancelled before another transfer failed.
+
 ### Anime identity and TRaSH alignment
 
 - Keep anime movies and series distinct across TMDB/AniList discovery, recommendations, metadata, library creation, and imports. Chainsaw Man and Reze Arc use separate media identities and download paths.

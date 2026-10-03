@@ -348,12 +348,8 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.cancelClientDownload(id, dlType, qbtHash, nzoID); err != nil {
+	if err := s.cancelTrackedDownload(id, dlType, qbtHash, nzoID); err != nil {
 		writeError(w, 502, "Cancellation failed: "+err.Error())
-		return
-	}
-	if _, err := s.db.Exec(`UPDATE downloads SET status='cancelled' WHERE id=?`, id); err != nil {
-		writeError(w, 500, "database error")
 		return
 	}
 	if epID.Valid {
