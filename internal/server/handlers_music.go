@@ -621,7 +621,7 @@ func (s *Server) handleDeleteMusicLibraryItem(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	rows, err := s.db.Query(`SELECT id,download_type,COALESCE(sabnzbd_nzo_id,''),COALESCE(qbt_hash,'') FROM downloads WHERE album_id = ? AND status NOT IN ('imported','failed')`, id)
+	rows, err := s.db.Query(`SELECT id,download_type,COALESCE(sabnzbd_nzo_id,''),COALESCE(qbt_hash,'') FROM downloads WHERE album_id = ? AND status NOT IN ('imported','failed','cancelled') ORDER BY id`, id)
 	if err != nil {
 		writeError(w, 500, "failed to load album downloads")
 		return
@@ -647,7 +647,7 @@ func (s *Server) handleDeleteMusicLibraryItem(w http.ResponseWriter, r *http.Req
 		return
 	}
 	for _, t := range transfers {
-		if err := s.cancelClientDownload(t.id, t.kind, sql.NullString{String: t.hash, Valid: t.hash != ""}, sql.NullString{String: t.nzb, Valid: t.nzb != ""}); err != nil {
+		if err := s.cancelTrackedDownload(t.id, t.kind, sql.NullString{String: t.hash, Valid: t.hash != ""}, sql.NullString{String: t.nzb, Valid: t.nzb != ""}); err != nil {
 			writeError(w, 502, "failed to cancel album download: "+err.Error())
 			return
 		}

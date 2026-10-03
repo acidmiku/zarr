@@ -119,6 +119,25 @@ func (s *Server) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Rel
 	return nzoID, nil
 }
 
+// Record each confirmed cancellation before continuing a multi-download removal.
+// A later client or filesystem failure must not make retries cancel it again.
+func (s *Server) cancelTrackedDownload(id int, kind string, hash, nzoID sql.NullString) error {
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM downloads WHERE id=?`, id).Scan(&status); err != nil {
+		return fmt.Errorf("read download state: %w", err)
+	}
+	if status == "cancelled" {
+		return nil
+	}
+	if err := s.cancelClientDownload(id, kind, hash, nzoID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE downloads SET status='cancelled' WHERE id=?`, id); err != nil {
+		return fmt.Errorf("save cancelled download state: %w", err)
+	}
+	return nil
+}
+
 func (s *Server) cancelClientDownload(id int, kind string, hash, nzoID sql.NullString) error {
 	if kind == "torrent" {
 		if s.qbt == nil {
