@@ -50,7 +50,7 @@ func (s *Server) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Rel
 	}
 	quality, _ := json.Marshal(rel.Quality)
 	res, err := s.db.Exec(`INSERT INTO downloads (media_item_id,episode_id,album_id,nzb_title,quality,score,download_type)
- SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id IS ? AND episode_id IS ? AND album_id IS ? AND status NOT IN ('imported','failed','cancelled','completed','seeding'))`, media, episode, album, rel.Title, string(quality), rel.Score, rel.DownloadType, media, episode, album)
+ SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id IS ? AND episode_id IS ? AND album_id IS ? AND status NOT IN ('imported','failed','cancelled','seeding'))`, media, episode, album, rel.Title, string(quality), rel.Score, rel.DownloadType, media, episode, album)
 	if err != nil {
 		return "", fmt.Errorf("record download: %w", err)
 	}
@@ -106,11 +106,11 @@ func (s *Server) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Rel
 	}
 	submitted = true
 	if albumID > 0 {
-		_, err = s.db.Exec(`UPDATE albums SET status='downloading',updated_at=CURRENT_TIMESTAMP WHERE id=?`, albumID)
+		_, err = s.db.Exec(`UPDATE albums SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, albumID)
 	} else if episodeID > 0 {
-		_, err = s.db.Exec(`UPDATE episodes SET status='downloading' WHERE id=?`, episodeID)
+		_, err = s.db.Exec(`UPDATE episodes SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END WHERE id=?`, episodeID)
 	} else {
-		_, err = s.db.Exec(`UPDATE media_items SET status='downloading' WHERE id=?`, mediaID)
+		_, err = s.db.Exec(`UPDATE media_items SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END WHERE id=?`, mediaID)
 	}
 	if err != nil {
 		return "", err

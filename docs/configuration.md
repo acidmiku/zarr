@@ -56,6 +56,8 @@ Enter an HTTP(S) or SOCKS5 proxy URL for external APIs. Downloader traffic stays
 
 Create or edit profiles for video and music with qualities, language, tag bonuses, reject patterns, and upgrade policy. Zarr supplies initial profiles and selects a suitable default when none is specified. Profiles still assigned to library items cannot be deleted.
 
+New anime additions default to separate **Anime Series · TRaSH** and **Anime Movies · TRaSH** profiles. In Settings, edit either preset to choose dual-audio preference, grouped qualities, minimum format score, upgrade cutoffs, and individual custom-format scores. Existing profiles and library assignments are preserved. See [Anime quality profiles](anime-quality-profiles.md) for the defaults, upgrade behavior, and compatibility limits.
+
 ## Environment variables
 
 Environment variables remain optional first-run seeds for existing deployment tooling. Once a setting exists in the database, the UI is authoritative, including an explicitly cleared key. Process settings such as `MEDIAFORGE_CONFIG_DIR`, `MEDIAFORGE_PORT`, and `MEDIAFORGE_LOG_LEVEL` remain environment variables.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"mediaforge/internal/indexer"
 )
@@ -71,14 +72,10 @@ func (s *Server) handleSearchReleases(w http.ResponseWriter, r *http.Request) {
 				releases = append(releases, rtReleases...)
 			}
 
-			var profile indexer.QualityProfile
-			s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-				FROM quality_profiles WHERE id = ?`, profileID).Scan(
-				&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-				&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+			profile := s.loadProfile(profileID)
 
 			for i := range releases {
-				indexer.ScoreRelease(&releases[i], &profile)
+				indexer.ScoreRelease(&releases[i], profile)
 			}
 		}
 	}
@@ -86,6 +83,12 @@ func (s *Server) handleSearchReleases(w http.ResponseWriter, r *http.Request) {
 	// Mark blacklisted releases as rejected (but keep visible for browsing)
 	blacklist := s.loadBlacklist(mediaItemID, episodeID)
 	releases = indexer.MarkBlacklisted(releases, blacklist)
+	sort.SliceStable(releases, func(i, j int) bool {
+		if releases[i].Acceptable != releases[j].Acceptable {
+			return releases[i].Acceptable
+		}
+		return indexer.CompareReleases(&releases[i], &releases[j]) > 0
+	})
 
 	if releases == nil {
 		releases = []indexer.Release{}

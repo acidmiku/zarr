@@ -40,6 +40,7 @@ func (p *Processor) ProcessTorrent(downloadID int, contentPath string) error {
 
 type importFile struct {
 	src, dst           string
+	previous           string
 	episodeID, trackID int
 	replace            bool
 }
@@ -56,8 +57,9 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 		return fmt.Errorf("download path is empty")
 	}
 	var mediaID, episodeID, albumID sql.NullInt64
-	var status string
-	if err := p.db.QueryRow(`SELECT media_item_id, episode_id, album_id, status FROM downloads WHERE id = ?`, downloadID).Scan(&mediaID, &episodeID, &albumID, &status); err != nil {
+	var status, releaseTitle string
+	var upgradeFrom sql.NullString
+	if err := p.db.QueryRow(`SELECT media_item_id, episode_id, album_id, status, nzb_title, upgrade_from_title FROM downloads WHERE id = ?`, downloadID).Scan(&mediaID, &episodeID, &albumID, &status, &releaseTitle, &upgradeFrom); err != nil {
 		return fmt.Errorf("lookup download: %w", err)
 	}
 	if status == "cancelled" {
@@ -66,6 +68,11 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 	if status == "imported" || status == "seeding" {
 		return nil
 	}
+	if upgradeFrom.Valid {
+		if err := p.validateUpgrade(int(mediaID.Int64), int(episodeID.Int64), releaseTitle); err != nil {
+			return err
+		}
+	}
 	var plan []importFile
 	var mediaType, title string
 	var err error
@@ -73,9 +80,9 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 		plan, err = p.albumPlan(int(albumID.Int64), downloadPath)
 	} else {
 		var year sql.NullInt64
-		var libraryRoot sql.NullString
+		var libraryRoot, currentTitle sql.NullString
 		var anime bool
-		err = p.db.QueryRow(`SELECT type, title, year, anime, root_path FROM media_items WHERE id = ?`, mediaID.Int64).Scan(&mediaType, &title, &year, &anime, &libraryRoot)
+		err = p.db.QueryRow(`SELECT type, title, year, anime, root_path, current_release_title FROM media_items WHERE id = ?`, mediaID.Int64).Scan(&mediaType, &title, &year, &anime, &libraryRoot, &currentTitle)
 		if err != nil {
 			return fmt.Errorf("lookup media: %w", err)
 		}
@@ -95,7 +102,12 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 					return err
 				}
 				dst := MoviePath(p.mediaRoot, title, int(year.Int64), filepath.Ext(src))
-				plan = []importFile{{src: src, dst: dst, replace: importedBefore > 0 && libraryRoot.Valid && filepath.Clean(libraryRoot.String) == filepath.Dir(dst)}}
+				tracked := (importedBefore > 0 || currentTitle.Valid && currentTitle.String != "") && libraryRoot.Valid && filepath.Clean(libraryRoot.String) == filepath.Dir(dst)
+				previous := ""
+				if tracked {
+					previous = previousMovieFile(dst)
+				}
+				plan = []importFile{{src: src, dst: dst, previous: previous, replace: tracked}}
 			} else {
 				plan, err = p.episodePlan(int(mediaID.Int64), episodeID, title, int(year.Int64), anime, files)
 			}
@@ -106,6 +118,9 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 	}
 	if len(plan) == 0 {
 		return fmt.Errorf("no files matched this download")
+	}
+	if upgradeFrom.Valid && mediaType == "movie" && plan[0].previous == "" {
+		return fmt.Errorf("automatic movie upgrade requires a single tracked baseline file")
 	}
 	seen := map[string]bool{}
 	for _, f := range plan {
@@ -119,6 +134,11 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 		}
 		if err := validateDestination(p.mediaRoot, f.dst); err != nil {
 			return err
+		}
+		if f.previous != "" && f.previous != f.dst {
+			if err := validateDestination(p.mediaRoot, f.previous); err != nil {
+				return fmt.Errorf("previous library file is unsafe: %w", err)
+			}
 		}
 	}
 	var installed []stagedFile
@@ -143,9 +163,14 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 		return err
 	}
 	defer tx.Rollback()
+	if upgradeFrom.Valid {
+		if err := validateUpgrade(tx, int(mediaID.Int64), int(episodeID.Int64), releaseTitle); err != nil {
+			return err
+		}
+	}
 	for _, f := range plan {
 		if f.episodeID > 0 {
-			_, err = tx.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, f.dst, f.episodeID)
+			_, err = tx.Exec(`UPDATE episodes SET file_path = ?, status = 'available', current_release_title=?, upgrade_checked_at=CURRENT_TIMESTAMP WHERE id = ?`, f.dst, importedReleaseTitle(releaseTitle), f.episodeID)
 		}
 		if f.trackID > 0 {
 			_, err = tx.Exec(`UPDATE tracks SET file_path = ?, status = 'available' WHERE id = ?`, f.dst, f.trackID)
@@ -157,7 +182,7 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 	if albumID.Valid {
 		_, err = tx.Exec(`UPDATE albums SET status = CASE WHEN (SELECT COUNT(*) FROM tracks WHERE album_id = ?) > 0 AND NOT EXISTS (SELECT 1 FROM tracks WHERE album_id = ? AND status != 'available') THEN 'available' ELSE 'wanted' END, root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, albumID.Int64, albumID.Int64, filepath.Dir(plan[0].dst), albumID.Int64)
 	} else if mediaType == "movie" {
-		_, err = tx.Exec(`UPDATE media_items SET root_path = ?, status = 'available', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, filepath.Dir(plan[0].dst), mediaID.Int64)
+		_, err = tx.Exec(`UPDATE media_items SET root_path = ?, status = 'available', current_release_title=?, upgrade_checked_at=CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, filepath.Dir(plan[0].dst), importedReleaseTitle(releaseTitle), mediaID.Int64)
 	} else {
 		_, err = tx.Exec(`UPDATE media_items SET status = CASE WHEN EXISTS (SELECT 1 FROM episodes WHERE media_item_id = ? AND episode_type = 'standard') AND NOT EXISTS (SELECT 1 FROM episodes WHERE media_item_id = ? AND episode_type = 'standard' AND status != 'available') THEN 'available' ELSE 'wanted' END, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, mediaID.Int64, mediaID.Int64, mediaID.Int64)
 	}
@@ -186,6 +211,15 @@ func (p *Processor) process(downloadID int, downloadPath string, torrent bool) e
 	committed = true
 	for _, f := range installed {
 		f.commit()
+	}
+	for _, f := range plan {
+		// A container change creates a new canonical path. Remove only the
+		// tracked old library link, after the new file and DB commit succeeded.
+		if f.previous != "" && filepath.Clean(f.previous) != filepath.Clean(f.dst) && filepath.Clean(f.previous) != filepath.Clean(f.src) {
+			if err := os.Remove(f.previous); err != nil && !os.IsNotExist(err) {
+				slog.Warn("could not remove replaced library file", "path", f.previous, "error", err)
+			}
+		}
 	}
 	if albumID.Valid {
 		p.SaveCoverToAlbumDir(int(albumID.Int64), filepath.Dir(plan[0].dst), downloadPath)
@@ -300,7 +334,7 @@ func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title stri
 		} else {
 			dst = SeriesEpisodePath(p.mediaRoot, title, year, e.season, e.number, e.title.String, ext)
 		}
-		plan = append(plan, importFile{src: src, dst: dst, episodeID: e.id, replace: e.path.Valid && filepath.Clean(e.path.String) == filepath.Clean(dst)})
+		plan = append(plan, importFile{src: src, dst: dst, previous: e.path.String, episodeID: e.id, replace: e.path.Valid && filepath.Clean(e.path.String) == filepath.Clean(dst)})
 	}
 	if len(plan) == 0 {
 		return nil, fmt.Errorf("download does not contain the requested episode")
@@ -497,6 +531,19 @@ func stageFile(src, dst string, replace bool) (stagedFile, error) {
 		if !replace {
 			return f, fmt.Errorf("destination already exists and is not tracked for this item")
 		}
+		// Prepare the complete replacement beside the destination first. A
+		// cross-volume copy must not hide the playable old file while copying.
+		staging, err := os.CreateTemp(filepath.Dir(dst), ".zarr-new-*")
+		if err != nil {
+			return f, err
+		}
+		stagedPath := staging.Name()
+		staging.Close()
+		os.Remove(stagedPath)
+		defer os.Remove(stagedPath)
+		if err := hardlinkFile(src, stagedPath); err != nil {
+			return f, err
+		}
 		tmp, err := os.CreateTemp(filepath.Dir(dst), ".zarr-backup-*")
 		if err != nil {
 			return f, err
@@ -504,10 +551,16 @@ func stageFile(src, dst string, replace bool) (stagedFile, error) {
 		backup := tmp.Name()
 		tmp.Close()
 		os.Remove(backup)
-		if err := os.Rename(dst, backup); err != nil {
+		if err := hardlinkFile(dst, backup); err != nil {
+			return f, err
+		}
+		if err := os.Rename(stagedPath, dst); err != nil {
+			os.Remove(backup)
 			return f, err
 		}
 		f.backup = backup
+		f.created = true
+		return f, nil
 	} else if !os.IsNotExist(err) {
 		return f, err
 	}

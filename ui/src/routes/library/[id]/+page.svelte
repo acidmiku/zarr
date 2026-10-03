@@ -1,4 +1,5 @@
 <script>
+	import ReleaseScore from '$lib/components/ReleaseScore.svelte';
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
@@ -348,7 +349,7 @@
 					<div class="empty">No releases found</div>
 				{:else}
 					<div class="releases-list">
-						{#each releases.sort((a, b) => b.score - a.score) as rel}
+						{#each releases as rel}
 							<div class="release" class:rejected={!rel.acceptable}>
 								<div class="rel-info">
 									<div class="rel-title">{rel.title}</div>
@@ -362,11 +363,11 @@
 										{/if}
 										{#each rel.tags || [] as tag}<span class="rel-tag">{tag}</span>{/each}
 									</div>
+									<ReleaseScore release={rel} />
 									{#if !rel.acceptable}
 										<div class="reject-reason">{rel.reject_reason}</div>
 									{/if}
 								</div>
-								<div class="rel-score">{rel.score || 0}</div>
 								{#if rel.acceptable}
 									<button class="btn btn-small" on:click={() => grabRelease(rel)}>Grab</button>
 								{/if}

@@ -33,9 +33,23 @@ This change builds on PR #1's Neon Archive interface. Three agents implemented a
 - Rebuilt and restarted the production Docker app. Live Anime search returns **Chainsaw Man (2022), TMDB 114410, series** and **Chainsaw Man - The Movie: Reze Arc (2025), TMDB 1218925, movie**. Both metadata endpoints preserve anime classification; the film has no seasons field.
 - Regression coverage exercises mixed movie/TV discovery, TMDB namespace collisions, TMDB/AniList additions, movie imports/scans, anime-only indexers across manual and scheduled searches, recommendation selection, movie/episode release separation, BD source aliases and combined-episode source retention.
 - No Chainsaw Man media was downloaded. Search and metadata checks used live TMDB; library creation, download routing and imports used isolated test fixtures.
-- [TRaSH anime scoring audit](anime-quality-audit.md) documents current gaps, including group tiers, quality grouping, subtitle certainty and automatic upgrades. This pass does not claim TRaSH scoring parity.
+- [TRaSH anime scoring audit](anime-quality-audit.md) records the baseline gaps before the alignment work below.
 
 ![Settings fields aligned](images/settings-alignment.jpg)
+
+## TRaSH alignment verification on 2026-10-04
+
+- Bundled the upstream Sonarr/Radarr anime profile definitions at `e7c97a676743d7430fc1c5808701c48252a2ac63`, including 41/31 custom formats, unmodified source JSON, MIT license, integrity manifest, and an explicit update script.
+- Added grouped quality ranking, upstream condition semantics and source mappings, minimum scores, revision/service/group preferences, dual-audio modes, quality/format cutoffs, and matched-format explanations. Regression tests check source constraints, negative guards, explicit zero overrides, preference round trips, and manifest/source parity.
+- Implemented bounded automatic upgrades and dual-number anime searches. Tests cover cutoff-aware candidate selection, cooldowns, duplicate reservations, failed downloads, retained sources, cancellation, profile/baseline changes, same/different-extension rollback, and preservation of torrent seeding data.
+- A second agent review found and fixed stale scanner provenance, custom cutoffs hiding eligible format upgrades, and missing supported trailing dual-audio labels. Twelve scanner cases cover stored/history baselines and same/changed paths without altering media bytes.
+- Existing profile definitions and library assignments survive migration unchanged. New additions and imports choose the appropriate anime movie/series preset when no explicit profile is supplied. API tests verify real ranking order, rejection reasons and explanation metadata.
+- Full `go test -race ./...` and `go vet ./...` passed. Production frontend build and all **38 Playwright tests** passed.
+- Production Docker build/startup and the live profile API passed. The API exposes both pinned presets alongside the four original profiles. Desktop and 390-pixel mobile profile editors were visually checked; browser tests also cover 320 pixels and credential field alignment.
+
+See [Anime quality profiles](anime-quality-profiles.md) for usage and remaining differences from Sonarr/Radarr, including title-based audio inference, MediaInfo, size limits and naming.
+
+![Live TRaSH profile editor](images/trash-profiles.jpg)
 
 ## Scope limits
 

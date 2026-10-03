@@ -2,6 +2,7 @@
 	import { createEventDispatcher, onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { mediaTypeLabel } from '$lib/media';
+	import { preferredVideoProfile } from '$lib/profiles';
 	import StatusBadge from './StatusBadge.svelte';
 
 	export let item = null;
@@ -10,12 +11,9 @@
 
 	const dispatch = createEventDispatcher();
 
-	let selectedProfile = (() => {
-		const videoProfiles = profiles.filter(p => p.profile_type !== 'music');
-		const keyword = item?.is_anime || item?.anime ? 'anime' : item?.type === 'movie' ? 'movie' : 'series';
-		const match = videoProfiles.find(p => p.name.toLowerCase().includes(keyword));
-		return match?.id || videoProfiles[0]?.id || 0;
-	})();
+	let selectedProfile = preferredVideoProfile(item, profiles);
+	// Profiles may arrive after the detail opens. Do not replace a user's selection.
+	$: if (!selectedProfile && profiles.length) selectedProfile = preferredVideoProfile(item, profiles);
 	let adding = false;
 	let searching = false;
 	let showSeasonPicker = false;

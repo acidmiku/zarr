@@ -277,10 +277,10 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 
 	var mediaItemID sql.NullInt64
 	var epID, albumID sql.NullInt64
-	var path sql.NullString
+	var path, upgradeFrom sql.NullString
 	var kind string
-	err = s.db.QueryRow(`SELECT media_item_id, episode_id, album_id, download_path, download_type FROM downloads WHERE id = ? AND status = 'failed'`,
-		id).Scan(&mediaItemID, &epID, &albumID, &path, &kind)
+	err = s.db.QueryRow(`SELECT media_item_id, episode_id, album_id, download_path, download_type, upgrade_from_title FROM downloads WHERE id = ? AND status = 'failed'`,
+		id).Scan(&mediaItemID, &epID, &albumID, &path, &kind, &upgradeFrom)
 	if err != nil {
 		writeError(w, 404, "failed download not found")
 		return
@@ -300,6 +300,21 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]string{"status": "imported"})
 			return
 		}
+	}
+	if upgradeFrom.Valid {
+		// A fresh upgrade check must apply today's profile and current release,
+		// rather than falling through to an unconditional wanted-item grab.
+		if epID.Valid {
+			_, err = s.db.Exec(`UPDATE episodes SET upgrade_checked_at=NULL WHERE id=?`, epID.Int64)
+		} else {
+			_, err = s.db.Exec(`UPDATE media_items SET upgrade_checked_at=NULL WHERE id=?`, mediaItemID.Int64)
+		}
+		if err != nil {
+			writeError(w, 500, "could not schedule upgrade check")
+			return
+		}
+		writeJSON(w, 200, map[string]string{"status": "retrying", "message": "Upgrade is eligible for the next quality scan (runs every 30 minutes)."})
+		return
 	}
 	if epID.Valid && mediaItemID.Valid {
 		s.db.Exec(`UPDATE episodes SET status='wanted' WHERE id=? AND status!='available'`, epID.Int64)

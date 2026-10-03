@@ -1,5 +1,7 @@
 # Anime quality audit
 
+> Historical baseline before the TRaSH alignment implementation. See [Anime quality profiles](anime-quality-profiles.md) for the implemented behavior and remaining limits.
+
 Reviewed 2026-10-04 against the current [Sonarr anime guide](https://trash-guides.info/Sonarr/sonarr-setup-quality-profiles-anime/) and [Radarr anime guide](https://trash-guides.info/Radarr/radarr-setup-quality-profiles-anime/).
 
 **Assessment: Zarr supports basic anime identification and release selection, but its scoring is not TRaSH-equivalent.** A percentage would suggest a compatibility test that does not exist. Both guides aim for the best overall release and use grouped qualities plus custom formats, including ranked release groups; Zarr has a flat quality list and a small set of title tags.

@@ -121,6 +121,17 @@ func TestAnimeMetadataAndLibraryCreationKeepMovieSeparateFromSeries(t *testing.T
 			if savedType != mediaType || !anime || rootPath != "" {
 				t.Fatalf("saved %s anime=%t path=%q", savedType, anime, rootPath)
 			}
+			var preset string
+			if err := s.db.QueryRow(`SELECT json_extract(p.scoring_config,'$.preset') FROM media_items m JOIN quality_profiles p ON p.id=m.quality_profile_id WHERE m.tmdb_id=100`).Scan(&preset); err != nil {
+				t.Fatal(err)
+			}
+			wanted := "sonarr-anime"
+			if mediaType == "movie" {
+				wanted = "radarr-anime"
+			}
+			if preset != wanted {
+				t.Fatalf("wrong default preset for %s: %s", mediaType, preset)
+			}
 			var seasons, episodes int
 			s.db.QueryRow(`SELECT count(*) FROM seasons`).Scan(&seasons)
 			s.db.QueryRow(`SELECT count(*) FROM episodes`).Scan(&episodes)
@@ -179,7 +190,7 @@ func TestImportAnimeMoviePreservesAnimeClassification(t *testing.T) {
 	if err := os.WriteFile(source, []byte("test video"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	result := s.importMovie(importItem{SourcePath: source, TMDBID: 100, Type: "movie", QualityProfileID: 1})
+	result := s.importMovie(importItem{SourcePath: source, TMDBID: 100, Type: "movie"})
 	if result.Status != "imported" {
 		t.Fatalf("import failed: %+v", result)
 	}
@@ -190,5 +201,9 @@ func TestImportAnimeMoviePreservesAnimeClassification(t *testing.T) {
 	}
 	if kind != "movie" || !anime || filepath.Base(filepath.Dir(root)) != "movies" {
 		t.Fatalf("import classification: %s anime=%t root=%s", kind, anime, root)
+	}
+	var preset string
+	if err := s.db.QueryRow(`SELECT json_extract(p.scoring_config,'$.preset') FROM media_items m JOIN quality_profiles p ON p.id=m.quality_profile_id WHERE m.id=?`, result.LibraryID).Scan(&preset); err != nil || preset != "radarr-anime" {
+		t.Fatalf("import default preset=%q err=%v", preset, err)
 	}
 }

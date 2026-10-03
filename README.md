@@ -9,6 +9,7 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 ### Unreleased — Neon Archive
 
 - New Neon Archive interface with a unified collection dashboard, responsive navigation, and live download panels.
+- Separate [TRaSH-based anime movie and series profiles](docs/anime-quality-profiles.md), with grouped qualities, custom formats, score explanations, and safe automatic upgrades.
 - [Screenshots and local verification](docs/neon-archive.md) · [Full changelog](CHANGELOG.md)
 
 
@@ -35,7 +36,7 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 - **Smart Discovery** — Trending content, search across TMDB, AniList, and MusicBrainz
 - **Dual Download** — Usenet (SABnzbd) and torrent (qBittorrent) support
 - **Multi-Indexer** — Newznab and Rutracker with priority management
-- **Release Scoring** — Automatic quality scoring, best release selection, and upgrades
+- **Release Scoring** — Quality profiles, best release selection, and automatic upgrades for the TRaSH anime presets
 - **AI Assistant** — Personalized recommendations via OpenRouter (Claude, GPT-4, etc.)
 - **Music Support** — Artist/album management with MusicBrainz and Last.fm metadata
 - **6 Themes** — Obsidian, Ember, Violet (dark) + Light, Rose, Mint (light)

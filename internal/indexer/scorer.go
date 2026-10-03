@@ -15,24 +15,32 @@ type QualityProfile struct {
 	RejectPatterns string `json:"reject_patterns"` // JSON array
 	UpgradeAllowed bool   `json:"upgrade_allowed"`
 	ProfileType    string `json:"profile_type"`
+	ScoringConfig  string `json:"scoring_config"`
 }
 
 // Release represents a found release with computed score.
 type Release struct {
-	Title        string   `json:"title"`
-	NZBURL       string   `json:"nzb_url"`
-	Size         int64    `json:"size"`
-	Quality      string   `json:"quality"`
-	Tags         []string `json:"tags"`
-	Score        int      `json:"score"`
-	Indexer      string   `json:"indexer"`
-	Category     string   `json:"category"`
-	Acceptable   bool     `json:"acceptable"`
-	RejectReason string   `json:"reject_reason,omitempty"`
-	DownloadType string   `json:"download_type"` // "nzb" or "torrent"
-	Seeders      int      `json:"seeders,omitempty"`
-	Leechers     int      `json:"leechers,omitempty"`
-	TopicID      int      `json:"topic_id,omitempty"` // Rutracker topic ID
+	Title          string        `json:"title"`
+	NZBURL         string        `json:"nzb_url"`
+	Size           int64         `json:"size"`
+	Quality        string        `json:"quality"`
+	Tags           []string      `json:"tags"`
+	Score          int           `json:"score"`
+	Indexer        string        `json:"indexer"`
+	Category       string        `json:"category"`
+	Acceptable     bool          `json:"acceptable"`
+	RejectReason   string        `json:"reject_reason,omitempty"`
+	DownloadType   string        `json:"download_type"` // "nzb" or "torrent"
+	Seeders        int           `json:"seeders,omitempty"`
+	Leechers       int           `json:"leechers,omitempty"`
+	TopicID        int           `json:"topic_id,omitempty"` // Rutracker topic ID
+	QualityRank    int           `json:"quality_rank"`
+	FormatScore    int           `json:"format_score"`
+	MatchedFormats []FormatMatch `json:"matched_formats,omitempty"`
+	ScoringPreset  string        `json:"scoring_preset,omitempty"`
+	ScoringVersion string        `json:"scoring_version,omitempty"`
+	ReleaseGroup   string        `json:"release_group,omitempty"`
+	Languages      []string      `json:"languages,omitempty"`
 }
 
 // ScoreRelease computes a score for a release against a quality profile.
@@ -41,8 +49,20 @@ func ScoreRelease(rel *Release, profile *QualityProfile) {
 	rel.Score = 0
 	rel.Acceptable = false
 	rel.RejectReason = ""
+	rel.QualityRank, rel.FormatScore = 0, 0
+	rel.MatchedFormats = nil
+	rel.ScoringPreset, rel.ScoringVersion = "", ""
 	if profile == nil {
 		rel.RejectReason = "quality profile not configured"
+		return
+	}
+	config, err := ResolveScoringConfig(profile.ScoringConfig)
+	if err != nil {
+		rel.RejectReason = "invalid scoring configuration: " + err.Error()
+		return
+	}
+	if config.Preset != "" {
+		scoreTRaSHRelease(rel, profile, config)
 		return
 	}
 	// Parse quality profile
@@ -121,7 +141,7 @@ func BestRelease(releases []Release) *Release {
 		if !releases[i].Acceptable {
 			continue
 		}
-		if best == nil || releases[i].Score > best.Score {
+		if best == nil || CompareReleases(&releases[i], best) > 0 {
 			best = &releases[i]
 		}
 	}

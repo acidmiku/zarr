@@ -13,6 +13,13 @@ func TestAnimeBluRaySourceAliases(t *testing.T) {
 		{"Chainsaw.Man.[BD][2160p]", "bluray-2160p"},
 		{"Chainsaw.Man.1080p.BD.Remux", "remux-1080p"},
 		{"[SomeBDGroup] Chainsaw Man - 01 [1080p WEB-DL]", "web-1080p"},
+		{"[Group] Archive [BD 720p]", "bluray-720p"},
+		{"[Group] Archive [576p BluRay]", "bluray-576p"},
+		{"[Group] Archive [480p BDRip]", "bluray-480p"},
+		{"Archive.480p.WEBRip", "web-480p"},
+		{"Archive.DVDRip", "dvd"},
+		{"Archive.SDTV", "sdtv"},
+		{"Archive.2160p.HDTV", "hdtv-2160p"},
 	} {
 		t.Run(tc.title, func(t *testing.T) {
 			if got := ParseReleaseName(tc.title).Quality; got != tc.quality {

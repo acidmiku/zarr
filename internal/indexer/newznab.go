@@ -382,40 +382,61 @@ func (c *NewznabClient) SearchMusic(indexers []IndexerConfig, artist, album stri
 // SearchAnimeEpisode searches all indexers for an anime episode using absolute numbering.
 func (c *NewznabClient) SearchAnimeEpisode(indexers []IndexerConfig, titles []string, absoluteNum int, seasonEpisode ...int) []Release {
 	var allReleases []Release
-
 	for _, idx := range indexers {
 		if !idx.Enabled {
 			continue
 		}
-
+		seenURLs, seenNames, seenQueries := map[string]bool{}, map[string]bool{}, map[string]bool{}
 		for _, title := range titles {
-			query := fmt.Sprintf("%s %d", title, absoluteNum)
-			items, err := c.SearchByText(idx, query)
-			if err != nil {
-				slog.Warn("indexer search failed", "indexer", idx.Name, "error", err)
+			if strings.TrimSpace(title) == "" {
 				continue
 			}
-
-			for _, item := range items {
-				matches := MatchesAbsoluteEpisode(item.Title, title, absoluteNum)
-				if len(seasonEpisode) == 2 {
-					matches = MatchesSeriesEpisode(item.Title, title, seasonEpisode[0], seasonEpisode[1], absoluteNum)
-				}
-				if !matches {
+			type query struct {
+				text     string
+				episodic bool
+			}
+			queries := []query{{text: fmt.Sprintf("%s %d", title, absoluteNum)}}
+			if len(seasonEpisode) == 2 {
+				queries = append(queries, query{text: fmt.Sprintf("%s S%02dE%02d", title, seasonEpisode[0], seasonEpisode[1]), episodic: true})
+			}
+			for _, query := range queries {
+				queryKey := fmt.Sprintf("%t:%s", query.episodic, strings.ToLower(query.text))
+				if seenQueries[queryKey] {
 					continue
 				}
-				parsed := ParseReleaseName(item.Title)
-				allReleases = append(allReleases, Release{
-					Title:   item.Title,
-					NZBURL:  item.Link,
-					Size:    item.Size,
-					Quality: parsed.Quality,
-					Tags:    parsed.Tags,
-					Indexer: idx.Name,
-				})
+				seenQueries[queryKey] = true
+				var items []NewznabItem
+				var err error
+				if query.episodic {
+					items, err = c.SearchTVByText(idx, query.text)
+				} else {
+					items, err = c.SearchByText(idx, query.text)
+				}
+				if err != nil {
+					slog.Warn("anime indexer query failed", "indexer", idx.Name, "error", err)
+					continue
+				}
+				for _, item := range items {
+					matches := MatchesAbsoluteEpisode(item.Title, title, absoluteNum)
+					if len(seasonEpisode) == 2 {
+						matches = MatchesSeriesEpisode(item.Title, title, seasonEpisode[0], seasonEpisode[1], absoluteNum)
+					}
+					if !matches {
+						continue
+					}
+					nameKey := strings.ToLower(strings.TrimSpace(item.Title))
+					if seenNames[nameKey] || (item.Link != "" && seenURLs[item.Link]) {
+						continue
+					}
+					seenNames[nameKey] = true
+					if item.Link != "" {
+						seenURLs[item.Link] = true
+					}
+					parsed := ParseReleaseName(item.Title)
+					allReleases = append(allReleases, Release{Title: item.Title, NZBURL: item.Link, Size: item.Size, Quality: parsed.Quality, Tags: parsed.Tags, Indexer: idx.Name, Category: item.Category})
+				}
 			}
 		}
 	}
-
 	return allReleases
 }

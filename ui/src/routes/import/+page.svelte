@@ -18,9 +18,6 @@
 	async function loadProfiles() {
 		try {
 			profiles = await api.getProfiles();
-			if (profiles.length > 0) {
-				selectedProfileId = profiles[0].id;
-			}
 		} catch {
 			profiles = [];
 		}
@@ -29,8 +26,8 @@
 	$: matchingProfiles = profiles.filter((p) =>
 		mediaType === 'music' ? p.profile_type === 'music' : p.profile_type !== 'music'
 	);
-	$: if (!matchingProfiles.some((p) => p.id === selectedProfileId))
-		selectedProfileId = matchingProfiles[0]?.id || 0;
+	$: if (selectedProfileId && !matchingProfiles.some((p) => p.id === selectedProfileId))
+		selectedProfileId = 0;
 
 	async function scan() {
 		if (scanning) return;
@@ -235,6 +232,7 @@
 			<div class="profile-select">
 				<label for="profile">Quality profile</label>
 				<select id="profile" bind:value={selectedProfileId}>
+					<option value={0}>Automatic (match media type)</option>
 					{#each matchingProfiles as p}
 						<option value={p.id}>{p.name}</option>
 					{/each}

@@ -38,6 +38,7 @@ type Scheduler struct {
 	qbt         *qbt.Client
 	rtClient    *rutracker.Client
 	cancel      context.CancelFunc
+	ctx         context.Context
 	wg          sync.WaitGroup
 	metadataMu  sync.RWMutex
 }
@@ -81,6 +82,7 @@ func (s *Scheduler) SetMetadataClient(client *metadata.TMDBClient) {
 func (s *Scheduler) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	s.ctx = ctx
 
 	// Recover interrupted searches before launching the new scheduler workers.
 	for _, table := range []string{"episodes", "media_items", "albums"} {
@@ -94,6 +96,7 @@ func (s *Scheduler) Start() {
 	s.runTask(ctx, "torrent-poll", 15*time.Second, s.pollTorrentDownloads)
 	s.runTask(ctx, "rss-sync", 15*time.Minute, s.rssSync)
 	s.runTask(ctx, "episode-check", 30*time.Minute, s.checkEpisodeAirDates)
+	s.runTask(ctx, "quality-upgrades", 30*time.Minute, s.checkQualityUpgrades)
 	s.runTask(ctx, "music-search", 30*time.Minute, s.searchWantedAlbums)
 	s.runTask(ctx, "seed-cleanup", 30*time.Minute, s.cleanupSeededTorrents)
 	s.runTask(ctx, "metadata-refresh", 24*time.Hour, s.refreshMetadata)
@@ -254,14 +257,14 @@ func (s *Scheduler) pollDownloads() {
 					albumID.Int64, slot.FailMessage)
 				slog.Warn("music download failed, will retry with next release", "album_id", albumID.Int64)
 			} else if episodeID.Valid {
-				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, episodeID.Int64)
+				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ? AND status != 'available'`, episodeID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'failed', ?)`,
 					mediaItemID.Int64, episodeID.Int64, "Failed: "+slot.FailMessage+", retrying with next release")
 				slog.Warn("episode download failed, will retry with next release", "episode_id", episodeID.Int64)
 				// Auto-retry with next best release
 				s.retryEpisodeWithNextRelease(int(mediaItemID.Int64), int(episodeID.Int64))
 			} else if mediaItemID.Valid {
-				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
+				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ? AND status != 'available'`, mediaItemID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
 					mediaItemID.Int64, "Failed: "+slot.FailMessage+", retrying with next release")
 				slog.Warn("movie download failed, will retry with next release", "media_item_id", mediaItemID.Int64)
@@ -503,10 +506,10 @@ func (s *Scheduler) loadIndexers() []indexer.IndexerConfig {
 // loadProfile loads a quality profile by ID.
 func (s *Scheduler) loadProfile(profileID int) *indexer.QualityProfile {
 	var profile indexer.QualityProfile
-	err := s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
+	err := s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video'),COALESCE(scoring_config,'{}')
 		FROM quality_profiles WHERE id = ?`, profileID).Scan(
 		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType)
+		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType, &profile.ScoringConfig)
 	if err != nil {
 		return nil
 	}
@@ -554,41 +557,7 @@ func (s *Scheduler) searchAndGrab(mediaItemID, episodeID int, title string, tvdb
 
 	// Rutracker search
 	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
-	if len(rtIndexers) > 0 && s.rtClient != nil {
-		query := fmt.Sprintf("%s S%02dE%02d", title, season, episode)
-		if anime && absNum.Valid {
-			query = fmt.Sprintf("%s %d", title, absNum.Int64)
-		}
-		forumIDs := rutracker.DefaultForumIDs[contentType]
-		for _, idx := range rtIndexers {
-			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
-			if err != nil {
-				slog.Warn("rutracker search failed", "indexer", idx.Name, "error", err)
-				continue
-			}
-			for _, r := range results {
-				absolute := 0
-				if anime && absNum.Valid {
-					absolute = int(absNum.Int64)
-				}
-				if !indexer.MatchesSeriesEpisode(r.Title, title, season, episode, absolute) {
-					continue
-				}
-				parsed := indexer.ParseReleaseName(r.Title)
-				releases = append(releases, indexer.Release{
-					Title:        r.Title,
-					Size:         r.Size,
-					Quality:      parsed.Quality,
-					Tags:         parsed.Tags,
-					Indexer:      idx.Name,
-					DownloadType: "torrent",
-					Seeders:      r.Seeders,
-					Leechers:     r.Leechers,
-					TopicID:      r.TopicID,
-				})
-			}
-		}
-	}
+	releases = append(releases, s.findTorrentEpisodes(rtIndexers, title, contentType, season, episode, absNum)...)
 
 	// Filter blacklisted releases and score
 	blacklist := s.loadBlacklist(mediaItemID, episodeID)
@@ -665,12 +634,12 @@ func (s *Scheduler) pollTorrentDownloads() {
 				s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'failed', ?)`,
 					albumID.Int64, "Torrent failed: "+t.State)
 			} else if episodeID.Valid {
-				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, episodeID.Int64)
+				s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ? AND status != 'available'`, episodeID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'failed', ?)`,
 					mediaItemID.Int64, episodeID.Int64, "Torrent failed, retrying with next release")
 				s.retryEpisodeWithNextRelease(int(mediaItemID.Int64), int(episodeID.Int64))
 			} else if mediaItemID.Valid {
-				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ?`, mediaItemID.Int64)
+				s.db.Exec(`UPDATE media_items SET status = 'wanted' WHERE id = ? AND status != 'available'`, mediaItemID.Int64)
 				s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'failed', ?)`,
 					mediaItemID.Int64, "Torrent failed, retrying with next release")
 				s.retryMovieWithNextRelease(int(mediaItemID.Int64))
@@ -905,33 +874,7 @@ func (s *Scheduler) retryEpisodeWithNextRelease(mediaItemID, episodeID int) {
 	}
 
 	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
-	if len(rtIndexers) > 0 && s.rtClient != nil {
-		query := fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)
-		if anime && absNum.Valid {
-			query = fmt.Sprintf("%s %d", title, absNum.Int64)
-		}
-		forumIDs := rutracker.DefaultForumIDs[contentType]
-		for _, idx := range rtIndexers {
-			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
-			if err != nil {
-				continue
-			}
-			for _, r := range results {
-				absolute := 0
-				if anime && absNum.Valid {
-					absolute = int(absNum.Int64)
-				}
-				if !indexer.MatchesSeriesEpisode(r.Title, title, seasonNum, epNum, absolute) {
-					continue
-				}
-				parsed := indexer.ParseReleaseName(r.Title)
-				releases = append(releases, indexer.Release{
-					Title: r.Title, Size: r.Size, Quality: parsed.Quality, Tags: parsed.Tags,
-					Indexer: idx.Name, DownloadType: "torrent", Seeders: r.Seeders, Leechers: r.Leechers, TopicID: r.TopicID,
-				})
-			}
-		}
-	}
+	releases = append(releases, s.findTorrentEpisodes(rtIndexers, title, contentType, seasonNum, epNum, absNum)...)
 
 	// Filter blacklisted and score
 	blacklist := s.loadBlacklist(mediaItemID, episodeID)
@@ -1057,7 +1000,7 @@ func resolveSABnzbdPath(sabPath string) string {
 	slog.Warn("could not remap SABnzbd path", "path", sabPath)
 	return sabPath
 }
-func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Release) error {
+func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Release, baseline ...string) error {
 	var media, episode, album any
 	if mediaID > 0 {
 		media = mediaID
@@ -1096,8 +1039,24 @@ func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.
 		return fmt.Errorf("library item not found")
 	}
 	quality, _ := json.Marshal(rel.Quality)
-	res, err := s.db.Exec(`INSERT INTO downloads (media_item_id,episode_id,album_id,nzb_title,quality,score,download_type)
- SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id IS ? AND episode_id IS ? AND album_id IS ? AND status NOT IN ('imported','failed','cancelled','completed','seeding'))`, media, episode, album, rel.Title, string(quality), rel.Score, rel.DownloadType, media, episode, album)
+	var upgradeFrom any
+	if len(baseline) > 0 {
+		upgradeFrom = baseline[0]
+	}
+	query := `INSERT INTO downloads (media_item_id,episode_id,album_id,nzb_title,quality,score,download_type,upgrade_from_title)
+ SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id IS ? AND episode_id IS ? AND album_id IS ? AND status NOT IN ('imported','failed','cancelled','seeding'))`
+	args := []any{media, episode, album, rel.Title, string(quality), rel.Score, rel.DownloadType, upgradeFrom, media, episode, album}
+	if upgradeFrom != nil {
+		if episodeID > 0 {
+			query += ` AND EXISTS(SELECT 1 FROM episodes e WHERE e.id=? AND e.status='available' AND COALESCE(NULLIF(e.current_release_title,''),(SELECT d.nzb_title FROM downloads d WHERE d.episode_id=e.id AND d.status IN ('imported','seeding') ORDER BY d.completed_at DESC,d.id DESC LIMIT 1),'')=?)`
+			args = append(args, episodeID, baseline[0])
+		} else {
+			query += ` AND EXISTS(SELECT 1 FROM media_items m WHERE m.id=? AND m.status='available' AND COALESCE(NULLIF(m.current_release_title,''),(SELECT d.nzb_title FROM downloads d WHERE d.media_item_id=m.id AND d.episode_id IS NULL AND d.status IN ('imported','seeding') ORDER BY d.completed_at DESC,d.id DESC LIMIT 1),'')=?)`
+			args = append(args, mediaID, baseline[0])
+		}
+	}
+	res, err := s.db.Exec(query, args...)
+
 	if err != nil {
 		return fmt.Errorf("record download: %w", err)
 	}
@@ -1153,11 +1112,11 @@ func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.
 	}
 	submitted = true
 	if albumID > 0 {
-		_, err = s.db.Exec(`UPDATE albums SET status='downloading',updated_at=CURRENT_TIMESTAMP WHERE id=?`, albumID)
+		_, err = s.db.Exec(`UPDATE albums SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, albumID)
 	} else if episodeID > 0 {
-		_, err = s.db.Exec(`UPDATE episodes SET status='downloading' WHERE id=?`, episodeID)
+		_, err = s.db.Exec(`UPDATE episodes SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END WHERE id=?`, episodeID)
 	} else {
-		_, err = s.db.Exec(`UPDATE media_items SET status='downloading' WHERE id=?`, mediaID)
+		_, err = s.db.Exec(`UPDATE media_items SET status=CASE WHEN status='available' THEN 'available' ELSE 'downloading' END WHERE id=?`, mediaID)
 	}
 	if err != nil {
 		return err

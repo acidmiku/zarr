@@ -120,8 +120,10 @@ func (s *Scanner) matchMovieFile(path string) bool {
 		return false
 	}
 
-	// Update the media item
-	_, err = s.db.Exec(`UPDATE media_items SET root_path = ?, status = 'available', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+	// A scan matches names, not an imported file identity. Even the same path
+	// may now contain an externally replaced file. Never retain an old release
+	// title or use NULL (which revives download history as an upgrade baseline).
+	_, err = s.db.Exec(`UPDATE media_items SET root_path = ?, status = 'available', current_release_title = 'manual-grab', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		filepath.Dir(path), id)
 	if err != nil {
 		return false
@@ -205,7 +207,9 @@ func (s *Scanner) matchEpisode(title string, anime bool, year, season, episode i
 		return false
 	}
 
-	if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, path, epID); err != nil {
+	// No persisted inode/content identity proves this is the previously
+	// imported file, even when file_path is unchanged; invalidate provenance.
+	if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available', current_release_title = 'manual-grab' WHERE id = ?`, path, epID); err != nil {
 		return false
 	}
 

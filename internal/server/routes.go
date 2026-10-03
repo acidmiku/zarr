@@ -35,6 +35,7 @@ func (s *Server) registerRoutes() {
 
 	// Quality Profiles
 	s.mux.HandleFunc("GET /api/profiles", s.runtimeHandler((*Server).handleListProfiles))
+	s.mux.HandleFunc("GET /api/profiles/presets", s.runtimeHandler((*Server).handleProfilePresets))
 	s.mux.HandleFunc("POST /api/profiles", s.runtimeHandler((*Server).handleCreateProfile))
 	s.mux.HandleFunc("PUT /api/profiles/{id}", s.runtimeHandler((*Server).handleUpdateProfile))
 	s.mux.HandleFunc("DELETE /api/profiles/{id}", s.runtimeHandler((*Server).handleDeleteProfile))

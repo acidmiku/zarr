@@ -11,6 +11,8 @@
 
 ## Managing Your Library
 
+For anime, new additions select the series or movie TRaSH preset automatically. To opt an existing item into the new scoring, open its Library detail page and change its quality profile. Editing the old **Anime** profile is optional; the migration does not change it. Release searches show expandable custom-format explanations and rejection reasons.
+
 - **Library** tab — View all content with filters (type, status)
 - Click any title to see:
   - Metadata and overview

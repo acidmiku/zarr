@@ -9,3 +9,5 @@ require (
 )
 
 require golang.org/x/text v0.34.0
+
+require github.com/dlclark/regexp2 v1.11.5

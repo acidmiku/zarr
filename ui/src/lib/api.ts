@@ -66,6 +66,7 @@ export const api = {
 
 	// Profiles
 	getProfiles: () => request('GET', '/profiles'),
+	getProfilePresets: () => request('GET', '/profiles/presets'),
 	createProfile: (data: any) => request('POST', '/profiles', data),
 	updateProfile: (id: number, data: any) => request('PUT', `/profiles/${id}`, data),
 	deleteProfile: (id: number) => request('DELETE', `/profiles/${id}`),

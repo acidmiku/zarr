@@ -59,8 +59,12 @@ test('import uses a matching profile and cannot change media type during a scan'
 	});
 	await page.goto('/import');
 	await page.locator('.type-buttons').getByRole('button', { name: 'Music', exact: false }).click();
-	await expect(page.getByLabel('Quality profile')).toHaveValue('4');
-	await expect(page.getByLabel('Quality profile').locator('option')).toHaveCount(1);
+	await expect(page.getByLabel('Quality profile')).toHaveValue('0');
+	await expect(page.getByLabel('Quality profile').locator('option')).toHaveCount(2);
+	await page.getByLabel('Quality profile').selectOption('4');
+	await page.locator('.type-buttons').getByRole('button', { name: 'Movies', exact: false }).click();
+	await expect(page.getByLabel('Quality profile')).toHaveValue('0');
+	await page.locator('.type-buttons').getByRole('button', { name: 'Music', exact: false }).click();
 	await page.getByLabel('Source directory').fill('/data/import/music');
 	await page.getByRole('button', { name: 'Scan Directory' }).click();
 	await expect(
@@ -69,4 +73,40 @@ test('import uses a matching profile and cannot change media type during a scan'
 	await expect(page.getByLabel('Source directory')).toBeDisabled();
 	release();
 	await expect(page.getByRole('button', { name: 'Scan Directory' })).toBeEnabled();
+});
+
+test('import leaves automatic video profile selection to matched metadata', async ({ page }) => {
+	await mockApi(page);
+	let payload;
+	await page.route('**/api/import/scan', (route) =>
+		route.fulfill({
+			json: [
+				{
+					source_path: '/data/import/anime-film',
+					title: 'Anime Film',
+					files: ['film.mkv'],
+					match: { tmdb_id: 123, title: 'Anime Film', year: '2025', is_anime: true }
+				}
+			]
+		})
+	);
+	await page.route('**/api/import/execute', async (route) => {
+		payload = route.request().postDataJSON();
+		await route.fulfill({ json: [{ status: 'imported' }] });
+	});
+	await page.goto('/import');
+	await expect(page.getByLabel('Quality profile')).toHaveValue('0');
+	await page.getByLabel('Quality profile').selectOption('1');
+	await page
+		.locator('.type-buttons')
+		.getByRole('button', { name: 'TV Series', exact: false })
+		.click();
+	await expect(page.getByLabel('Quality profile')).toHaveValue('1');
+	await page.locator('.type-buttons').getByRole('button', { name: 'Movies', exact: false }).click();
+	await page.getByLabel('Quality profile').selectOption('0');
+	await page.getByLabel('Source directory').fill('/data/import/anime-film');
+	await page.getByRole('button', { name: 'Scan Directory' }).click();
+	await page.getByRole('button', { name: 'Import 1 item', exact: true }).click();
+	await expect.poll(() => payload?.items?.length).toBe(1);
+	expect(payload.items[0]).toMatchObject({ type: 'movie', tmdb_id: 123, quality_profile_id: 0 });
 });

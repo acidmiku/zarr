@@ -1,0 +1,2 @@
+# Preserve upstream bytes and manifest hashes on Windows and Unix checkouts.
+* -text

@@ -6,10 +6,16 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"mediaforge/internal/indexer"
 )
 
+func (s *Server) handleProfilePresets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, indexer.ScoringPresets())
+}
+
 func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
+	rows, err := s.db.Query(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video'), scoring_config
 		FROM quality_profiles ORDER BY id`)
 	if err != nil {
 		slog.Error("load quality profiles", "error", err)
@@ -27,15 +33,23 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 		RejectPatterns json.RawMessage `json:"reject_patterns"`
 		UpgradeAllowed bool            `json:"upgrade_allowed"`
 		ProfileType    string          `json:"profile_type"`
+		ScoringConfig  json.RawMessage `json:"scoring_config"`
 	}
 
 	var profiles []profileEntry
 	for rows.Next() {
 		var p profileEntry
-		var qualities, tags, reject string
-		if err := rows.Scan(&p.ID, &p.Name, &qualities, &tags, &p.Language, &reject, &p.UpgradeAllowed, &p.ProfileType); err != nil {
-			continue
+		var qualities, tags, reject, scoring string
+		if err := rows.Scan(&p.ID, &p.Name, &qualities, &tags, &p.Language, &reject, &p.UpgradeAllowed, &p.ProfileType, &scoring); err != nil {
+			writeError(w, 500, "failed to read profile")
+			return
 		}
+		resolved, err := normalizedScoringConfig(json.RawMessage(scoring))
+		if err != nil {
+			writeError(w, 500, "invalid saved scoring configuration")
+			return
+		}
+		p.ScoringConfig = resolved
 		p.Qualities = json.RawMessage(qualities)
 		if tags != "" {
 			p.Tags = json.RawMessage(tags)
@@ -48,6 +62,10 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, r *http.Request) {
 			p.RejectPatterns = json.RawMessage("[]")
 		}
 		profiles = append(profiles, p)
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, 500, "failed to read profiles")
+		return
 	}
 
 	if profiles == nil {
@@ -70,9 +88,9 @@ func (s *Server) handleCreateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	qualities, tags, reject := string(req.Qualities), string(req.Tags), string(req.RejectPatterns)
 
-	result, err := s.db.Exec(`INSERT INTO quality_profiles (name, qualities, tags, language, reject_patterns, upgrade_allowed, profile_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		req.Name, qualities, tags, req.Language, reject, req.UpgradeAllowed, req.ProfileType)
+	result, err := s.db.Exec(`INSERT INTO quality_profiles (name, qualities, tags, language, reject_patterns, upgrade_allowed, profile_type, scoring_config)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		req.Name, qualities, tags, req.Language, reject, req.UpgradeAllowed, req.ProfileType, string(req.ScoringConfig))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeError(w, 409, "a profile with this name already exists")
@@ -98,6 +116,16 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
+	// Older clients do not know about scoring_config. An unrelated edit must
+	// not silently turn a TRaSH profile back into a legacy profile.
+	var existingScoring string
+	if err := s.db.QueryRow(`SELECT scoring_config FROM quality_profiles WHERE id=?`, id).Scan(&existingScoring); err != nil {
+		writeError(w, 404, "profile not found")
+		return
+	}
+	if len(req.ScoringConfig) == 0 {
+		req.ScoringConfig = json.RawMessage(existingScoring)
+	}
 
 	if err := req.validate(); err != nil {
 		writeError(w, 400, err.Error())
@@ -106,9 +134,9 @@ func (s *Server) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	profileType := req.ProfileType
 
 	result, err := s.db.Exec(`UPDATE quality_profiles SET name = ?, qualities = ?, tags = ?, language = ?,
-		reject_patterns = ?, upgrade_allowed = ?, profile_type = ? WHERE id = ?`,
+		reject_patterns = ?, upgrade_allowed = ?, profile_type = ?, scoring_config = ? WHERE id = ?`,
 		req.Name, string(req.Qualities), string(req.Tags), req.Language,
-		string(req.RejectPatterns), req.UpgradeAllowed, profileType, id)
+		string(req.RejectPatterns), req.UpgradeAllowed, profileType, string(req.ScoringConfig), id)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			writeError(w, 409, "a profile with this name already exists")
@@ -156,6 +184,7 @@ type profileRequest struct {
 	RejectPatterns json.RawMessage `json:"reject_patterns"`
 	UpgradeAllowed bool            `json:"upgrade_allowed"`
 	ProfileType    string          `json:"profile_type"`
+	ScoringConfig  json.RawMessage `json:"scoring_config"`
 }
 
 func (p *profileRequest) validate() error {
@@ -169,9 +198,32 @@ func (p *profileRequest) validate() error {
 	if p.ProfileType != "video" && p.ProfileType != "music" {
 		return fmt.Errorf("profile_type must be video or music")
 	}
+	var err error
+	p.ScoringConfig, err = normalizedScoringConfig(p.ScoringConfig)
+	if err != nil {
+		return err
+	}
+	if string(p.ScoringConfig) != "{}" {
+		if p.ProfileType != "video" {
+			return fmt.Errorf("anime scoring requires a video profile")
+		}
+		// The grouped configuration is authoritative for advanced profiles;
+		// keep the legacy flat summary in sync for older clients.
+		var config struct {
+			QualityGroups [][]string `json:"quality_groups"`
+		}
+		if err := json.Unmarshal(p.ScoringConfig, &config); err != nil {
+			return err
+		}
+		var flat []string
+		for _, group := range config.QualityGroups {
+			flat = append(flat, group...)
+		}
+		p.Qualities, _ = json.Marshal(flat)
+	}
 	if p.Language == "" {
 		p.Language = "en"
-		if p.ProfileType == "music" {
+		if p.ProfileType == "music" || string(p.ScoringConfig) != "{}" {
 			p.Language = "any"
 		}
 	}
@@ -206,6 +258,27 @@ func (p *profileRequest) validate() error {
 	return nil
 }
 
+func normalizedScoringConfig(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, fmt.Errorf("scoring_config must be an object")
+	}
+	if len(fields) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	if err := indexer.ValidateScoringConfig(string(raw)); err != nil {
+		return nil, err
+	}
+	resolved, err := indexer.ResolveScoringConfig(string(raw))
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(resolved)
+}
+
 // resolveProfile chooses a seeded profile when the caller omits one and rejects
 // nonexistent or mismatched profiles before any library side effects occur.
 func (s *Server) resolveProfile(id int, profileType string) (int, error) {
@@ -224,4 +297,18 @@ func (s *Server) resolveProfile(id int, profileType string) (int, error) {
 		return 0, fmt.Errorf("quality_profile_id must reference a %s profile", profileType)
 	}
 	return id, nil
+}
+
+func (s *Server) resolveMediaProfile(id int, mediaType string, anime bool) (int, error) {
+	if id == 0 && anime {
+		preset := "sonarr-anime"
+		if mediaType == "movie" {
+			preset = "radarr-anime"
+		}
+		// Only new additions without an explicit choice use the new defaults.
+		// Existing assignments and explicitly selected legacy profiles are kept.
+		_ = s.db.QueryRow(`SELECT id FROM quality_profiles WHERE profile_type='video'
+			AND json_extract(CASE WHEN json_valid(scoring_config) THEN scoring_config ELSE '{}' END,'$.preset')=? ORDER BY id LIMIT 1`, preset).Scan(&id)
+	}
+	return s.resolveProfile(id, "video")
 }

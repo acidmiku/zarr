@@ -358,18 +358,14 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 		releases = append(releases, rtReleases...)
 	}
 
-	var profile indexer.QualityProfile
-	s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-		FROM quality_profiles WHERE id = ?`, profileID).Scan(
-		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+	profile := s.loadProfile(profileID)
 
 	// Filter blacklisted releases
 	movieBlacklist := s.loadBlacklist(mediaID, 0)
 	releases = indexer.FilterBlacklisted(releases, movieBlacklist)
 
 	for i := range releases {
-		indexer.ScoreRelease(&releases[i], &profile)
+		indexer.ScoreRelease(&releases[i], profile)
 	}
 
 	best := indexer.BestRelease(releases)
@@ -432,27 +428,24 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	// Rutracker search
 	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
 	if len(rtIndexers) > 0 {
-		query := fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)
-		if anime && absNum.Valid {
-			query = fmt.Sprintf("%s %d", title, absNum.Int64)
-		}
-		rtReleases := s.searchRutracker(rtIndexers, query, contentType)
+		queries := []string{fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)}
 		absolute := 0
 		if anime && absNum.Valid {
 			absolute = int(absNum.Int64)
+			queries = append(queries, fmt.Sprintf("%s %d", title, absolute))
 		}
-		rtReleases = indexer.FilterEpisodeReleases(rtReleases, title, seasonNum, epNum, absolute)
-		releases = append(releases, rtReleases...)
+		var torrents []indexer.Release
+		for _, query := range queries {
+			torrents = append(torrents, s.searchRutracker(rtIndexers, query, contentType)...)
+		}
+		torrents = indexer.FilterEpisodeReleases(indexer.DeduplicateReleases(torrents), title, seasonNum, epNum, absolute)
+		releases = append(releases, torrents...)
 	}
 
-	var profile indexer.QualityProfile
-	s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-		FROM quality_profiles WHERE id = ?`, profileID).Scan(
-		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+	profile := s.loadProfile(profileID)
 
 	for i := range releases {
-		indexer.ScoreRelease(&releases[i], &profile)
+		indexer.ScoreRelease(&releases[i], profile)
 	}
 
 	return releases, nil

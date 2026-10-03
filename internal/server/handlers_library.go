@@ -40,11 +40,11 @@ func (s *Server) handleAddToLibrary(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var err error
-	req.QualityProfileID, err = s.resolveProfile(req.QualityProfileID, "video")
-	if err != nil {
-		writeError(w, 400, err.Error())
-		return
+	if req.QualityProfileID != 0 {
+		if _, err := s.resolveProfile(req.QualityProfileID, "video"); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 	}
 	if req.AniListID > 0 {
 		s.addAnimeToLibrary(w, req)
@@ -71,6 +71,12 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 			writeError(w, 500, "TMDB fetch failed: "+err.Error())
 			return
 		}
+		anime := req.Anime || s.tmdb.IsAnimeMovie(movie)
+		req.QualityProfileID, err = s.resolveMediaProfile(req.QualityProfileID, "movie", anime)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 
 		year := 0
 		if len(movie.ReleaseDate) >= 4 {
@@ -83,7 +89,7 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 		result, err := s.db.Exec(`INSERT INTO media_items
 			(type, title, year, anime, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id)
 			VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?)`,
-			movie.Title, year, req.Anime || s.tmdb.IsAnimeMovie(movie), movie.ID, movie.IMDbID,
+			movie.Title, year, anime, movie.ID, movie.IMDbID,
 			movie.Overview,
 			metadata.PosterURL(movie.PosterPath),
 			metadata.BackdropURL(movie.BackdropPath),
@@ -123,6 +129,11 @@ func (s *Server) addTMDBToLibrary(w http.ResponseWriter, req addToLibraryRequest
 		genresJSON, _ := json.Marshal(genres)
 
 		anime := req.Anime || s.tmdb.IsAnime(tv)
+		req.QualityProfileID, err = s.resolveMediaProfile(req.QualityProfileID, "series", anime)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
 
 		selectedSeasons := make(map[int]bool)
 		for _, sn := range req.Seasons {
@@ -217,6 +228,11 @@ func (s *Server) addAnimeToLibrary(w http.ResponseWriter, req addToLibraryReques
 	mediaType := "series"
 	if strings.EqualFold(media.Format, "MOVIE") {
 		mediaType = "movie"
+	}
+	req.QualityProfileID, err = s.resolveMediaProfile(req.QualityProfileID, mediaType, true)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
 	}
 
 	genres, _ := json.Marshal(media.Genres)

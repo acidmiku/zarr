@@ -837,10 +837,10 @@ func (s *Server) handleMusicCover(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadProfile(profileID int) *indexer.QualityProfile {
 	var profile indexer.QualityProfile
-	err := s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
+	err := s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed, COALESCE(profile_type, 'video'), scoring_config
 		FROM quality_profiles WHERE id = ?`, profileID).Scan(
 		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType)
+		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType, &profile.ScoringConfig)
 	if err != nil {
 		return nil
 	}

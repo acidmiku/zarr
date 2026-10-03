@@ -463,12 +463,15 @@ func (s *Server) handleImportExecute(w http.ResponseWriter, r *http.Request) {
 		if item.Type == "music" {
 			profileType = "music"
 		}
-		profileID, err := s.resolveProfile(item.QualityProfileID, profileType)
-		if err != nil {
-			results = append(results, importResult{SourcePath: item.SourcePath, Status: "error", Message: err.Error()})
-			continue
+		// Video defaults depend on metadata (anime movie versus series).
+		if item.QualityProfileID != 0 || profileType == "music" {
+			profileID, err := s.resolveProfile(item.QualityProfileID, profileType)
+			if err != nil {
+				results = append(results, importResult{SourcePath: item.SourcePath, Status: "error", Message: err.Error()})
+				continue
+			}
+			item.QualityProfileID = profileID
 		}
-		item.QualityProfileID = profileID
 		switch item.Type {
 		case "movie":
 			res = s.importMovie(item)
@@ -511,6 +514,11 @@ func (s *Server) importMovie(item importItem) importResult {
 		res.Message = "TMDB fetch failed: " + err.Error()
 		return res
 	}
+	item.QualityProfileID, err = s.resolveMediaProfile(item.QualityProfileID, "movie", s.tmdb.IsAnimeMovie(movie))
+	if err != nil {
+		res.Status, res.Message = "error", err.Error()
+		return res
+	}
 
 	year := 0
 	if len(movie.ReleaseDate) >= 4 {
@@ -551,8 +559,8 @@ func (s *Server) importMovie(item importItem) importResult {
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT INTO media_items
-		(type, title, year, anime, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path, status)
-		VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?, 'available')`,
+		(type, title, year, anime, tmdb_id, imdb_id, overview, poster_url, backdrop_url, genres, rating, rating_source, quality_profile_id, root_path, status, current_release_title)
+		VALUES ('movie', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'tmdb', ?, ?, 'available', ?)`,
 		movie.Title, year, s.tmdb.IsAnimeMovie(movie), movie.ID, movie.IMDbID,
 		movie.Overview,
 		metadata.PosterURL(movie.PosterPath),
@@ -561,6 +569,7 @@ func (s *Server) importMovie(item importItem) importResult {
 		movie.VoteAverage,
 		item.QualityProfileID,
 		filepath.Dir(destPath),
+		filepath.Base(srcFile),
 	)
 	if err != nil {
 		res.Status = "error"
@@ -626,6 +635,11 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 	}
 
 	isAnime := anime || s.tmdb.IsAnime(tv)
+	item.QualityProfileID, err = s.resolveMediaProfile(item.QualityProfileID, "series", isAnime)
+	if err != nil {
+		res.Status, res.Message = "error", err.Error()
+		return res
+	}
 
 	// Check already in library
 	var existingID int
@@ -782,7 +796,7 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 			continue
 		}
 
-		if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, destPath, epID); err != nil {
+		if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available', current_release_title = ? WHERE id = ?`, destPath, filepath.Base(ep.file), epID); err != nil {
 			moveFileForImport(destPath, ep.file)
 			continue
 		}
