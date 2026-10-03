@@ -148,24 +148,23 @@ func (s *Server) handleListRatings(w http.ResponseWriter, r *http.Request) {
 	if order != "asc" {
 		order = "desc"
 	}
-	sort.Slice(items, func(i, j int) bool {
-		var less bool
+	sort.SliceStable(items, func(i, j int) bool {
+		comparison := 0
 		switch sortBy {
 		case "date":
-			less = strings.Compare(items[i].UpdatedAt, items[j].UpdatedAt) < 0
+			comparison = strings.Compare(items[i].UpdatedAt, items[j].UpdatedAt)
 		case "title":
-			less = strings.Compare(strings.ToLower(items[i].Title), strings.ToLower(items[j].Title)) < 0
-		default: // rating
-			if items[i].Rating != items[j].Rating {
-				less = items[i].Rating < items[j].Rating
-			} else {
-				less = strings.Compare(items[i].UpdatedAt, items[j].UpdatedAt) < 0
+			comparison = strings.Compare(strings.ToLower(items[i].Title), strings.ToLower(items[j].Title))
+		default:
+			comparison = items[i].Rating - items[j].Rating
+			if comparison == 0 {
+				comparison = strings.Compare(items[i].UpdatedAt, items[j].UpdatedAt)
 			}
 		}
 		if order == "desc" {
-			return !less
+			return comparison > 0
 		}
-		return less
+		return comparison < 0
 	})
 
 	if items == nil {
@@ -207,10 +206,14 @@ func (s *Server) handleUpsertRating(w http.ResponseWriter, r *http.Request) {
 
 	// For music, tmdb_id is actually the album_id — update albums table directly
 	if req.MediaType == "music" {
-		_, err := s.db.Exec(`UPDATE albums SET rating = ?, rating_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		result, err := s.db.Exec(`UPDATE albums SET rating = ?, rating_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 			req.Rating, req.Comment, req.TMDBID)
 		if err != nil {
 			writeError(w, 500, "database error: "+err.Error())
+			return
+		}
+		if count, _ := result.RowsAffected(); count == 0 {
+			writeError(w, 404, "album not found")
 			return
 		}
 		writeJSON(w, 200, map[string]string{"status": "saved"})
@@ -269,6 +272,21 @@ func (s *Server) handleGetRating(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var nullComment sql.NullString
+	if mediaType == "music" {
+		err = s.db.QueryRow(`SELECT id, rating, rating_comment, created_at, updated_at FROM albums WHERE id = ? AND rating IS NOT NULL`, tmdbID).Scan(&rating.TMDBID, &rating.Rating, &nullComment, &rating.CreatedAt, &rating.UpdatedAt)
+		if err == sql.ErrNoRows {
+			writeJSON(w, 200, nil)
+			return
+		}
+		if err != nil {
+			writeError(w, 500, "database error")
+			return
+		}
+		rating.MediaType = "music"
+		rating.Comment = nullComment.String
+		writeJSON(w, 200, rating)
+		return
+	}
 	err = s.db.QueryRow(`SELECT tmdb_id, media_type, rating, comment, created_at, updated_at
 		FROM user_ratings WHERE tmdb_id = ? AND media_type = ?`,
 		tmdbID, mediaType).Scan(
@@ -300,11 +318,17 @@ func (s *Server) handleDeleteRating(w http.ResponseWriter, r *http.Request) {
 
 	// For music, tmdbID is actually album_id — clear rating on albums table
 	if mediaType == "music" {
-		s.db.Exec(`UPDATE albums SET rating = NULL, rating_comment = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tmdbID)
+		if _, err := s.db.Exec(`UPDATE albums SET rating = NULL, rating_comment = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, tmdbID); err != nil {
+			writeError(w, 500, "database error")
+			return
+		}
 		writeJSON(w, 200, map[string]string{"status": "deleted"})
 		return
 	}
 
-	s.db.Exec(`DELETE FROM user_ratings WHERE tmdb_id = ? AND media_type = ?`, tmdbID, mediaType)
+	if _, err := s.db.Exec(`DELETE FROM user_ratings WHERE tmdb_id = ? AND media_type = ?`, tmdbID, mediaType); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }

@@ -4,12 +4,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"mediaforge/internal/metadata"
 )
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	mediaType := r.URL.Query().Get("type")
 
 	if query == "" {
@@ -23,19 +24,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "TMDB not configured")
 			return
 		}
-		results, err := s.tmdb.SearchTV(query)
+		results, err := s.animeResults(
+			func() (*metadata.TMDBSearchResult, error) { return s.tmdb.SearchTV(query) },
+			func() (*metadata.TMDBSearchResult, error) { return s.tmdb.SearchMovies(query) }, true)
 		if err != nil {
 			writeError(w, 500, "TMDB search failed: "+err.Error())
 			return
 		}
-		// Filter to anime only (Animation genre + JP origin)
-		var animeResults []metadata.TMDBMediaEntry
-		for _, e := range results.Results {
-			if isAnimeEntry(e) {
-				animeResults = append(animeResults, e)
-			}
-		}
-		writeJSON(w, 200, s.formatTMDBResults(animeResults, "series"))
+		writeJSON(w, 200, results)
 
 	case "movie":
 		if s.tmdb == nil {
@@ -69,6 +65,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTrending(w http.ResponseWriter, r *http.Request) {
 	mediaType := r.URL.Query().Get("type")
 	page := queryInt(r, "page", 1)
+	if page < 1 || page > 500 {
+		writeError(w, 400, "page must be between 1 and 500")
+		return
+	}
 
 	switch mediaType {
 	case "anime":
@@ -76,12 +76,14 @@ func (s *Server) handleTrending(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "TMDB not configured")
 			return
 		}
-		results, err := s.tmdb.DiscoverAnimeTV(page)
+		results, err := s.animeResults(
+			func() (*metadata.TMDBSearchResult, error) { return s.tmdb.DiscoverAnimeTV(page) },
+			func() (*metadata.TMDBSearchResult, error) { return s.tmdb.DiscoverAnimeMovies(page) }, false)
 		if err != nil {
 			writeError(w, 500, "TMDB anime trending failed: "+err.Error())
 			return
 		}
-		writeJSON(w, 200, s.formatTMDBResults(results.Results, "series"))
+		writeJSON(w, 200, results)
 
 	case "movie":
 		if s.tmdb == nil {
@@ -132,7 +134,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, movie)
+		writeJSON(w, 200, struct {
+			*metadata.TMDBMovieDetail
+			Type    string `json:"type"`
+			IsAnime bool   `json:"is_anime"`
+		}{movie, "movie", s.tmdb.IsAnimeMovie(movie)})
 
 	case "series", "":
 		tv, err := s.tmdb.GetTV(tmdbID)
@@ -140,7 +146,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, tv)
+		writeJSON(w, 200, struct {
+			*metadata.TMDBTVDetail
+			Type    string `json:"type"`
+			IsAnime bool   `json:"is_anime"`
+		}{tv, "series", s.tmdb.IsAnime(tv)})
 
 	default:
 		writeError(w, 400, "invalid type")
@@ -165,44 +175,79 @@ func (s *Server) handleAnilistMetadata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, 200, media)
+	mediaType := "series"
+	if strings.EqualFold(media.Format, "MOVIE") {
+		mediaType = "movie"
+	}
+	writeJSON(w, 200, struct {
+		*metadata.AniListMedia
+		Type    string `json:"type"`
+		IsAnime bool   `json:"is_anime"`
+	}{media, mediaType, true})
 }
 
 type tmdbResultEntry struct {
-	TMDBID      int      `json:"tmdb_id"`
-	Title       string   `json:"title"`
-	Overview    string   `json:"overview"`
-	PosterURL   string   `json:"poster_url"`
-	BackdropURL string   `json:"backdrop_url,omitempty"`
-	Year        int      `json:"year"`
-	Rating      float64  `json:"rating"`
-	Type        string   `json:"type"`
-	InLibrary   bool     `json:"in_library"`
-	LibraryID   int      `json:"library_id,omitempty"`
-	IsAnime     bool     `json:"is_anime,omitempty"`
+	TMDBID      int     `json:"tmdb_id"`
+	Title       string  `json:"title"`
+	Overview    string  `json:"overview"`
+	PosterURL   string  `json:"poster_url"`
+	BackdropURL string  `json:"backdrop_url,omitempty"`
+	Year        int     `json:"year"`
+	Rating      float64 `json:"rating"`
+	Type        string  `json:"type"`
+	InLibrary   bool    `json:"in_library"`
+	LibraryID   int     `json:"library_id,omitempty"`
+	IsAnime     bool    `json:"is_anime,omitempty"`
 }
 
-func isAnimeEntry(e metadata.TMDBMediaEntry) bool {
-	hasAnimation := false
-	for _, g := range e.GenreIDs {
-		if g == 16 {
-			hasAnimation = true
-			break
+// Load both TMDB namespaces concurrently, then interleave their rankings so
+// anime movies remain visible alongside series. Numeric TMDB IDs are only
+// unique within a media type and must never be deduplicated across types.
+func (s *Server) animeResults(tvFetch, movieFetch func() (*metadata.TMDBSearchResult, error), filter bool) ([]tmdbResultEntry, error) {
+	var tv, movies *metadata.TMDBSearchResult
+	var tvErr, movieErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); tv, tvErr = tvFetch() }()
+	go func() { defer wg.Done(); movies, movieErr = movieFetch() }()
+	wg.Wait()
+	if tvErr != nil {
+		return nil, tvErr
+	}
+	if movieErr != nil {
+		return nil, movieErr
+	}
+	format := func(entries []metadata.TMDBMediaEntry, mediaType string) []tmdbResultEntry {
+		filtered := make([]metadata.TMDBMediaEntry, 0, len(entries))
+		for _, entry := range entries {
+			if !filter || metadata.IsAnimeEntry(entry) {
+				filtered = append(filtered, entry)
+			}
+		}
+		results := s.formatTMDBResults(filtered, mediaType)
+		// Discover requests already require JP origin and Animation, even
+		// when TMDB omits those fields from an individual movie response.
+		for i := range results {
+			results[i].IsAnime = true
+		}
+		return results
+	}
+	tvResults := format(tv.Results, "series")
+	movieResults := format(movies.Results, "movie")
+	out := make([]tmdbResultEntry, 0, len(tvResults)+len(movieResults))
+	for i := 0; i < len(tvResults) || i < len(movieResults); i++ {
+		if i < len(tvResults) {
+			out = append(out, tvResults[i])
+		}
+		if i < len(movieResults) {
+			out = append(out, movieResults[i])
 		}
 	}
-	if !hasAnimation {
-		return false
-	}
-	for _, c := range e.OriginCountry {
-		if strings.ToUpper(c) == "JP" {
-			return true
-		}
-	}
-	return false
+	return out, nil
 }
 
 func (s *Server) formatTMDBResults(entries []metadata.TMDBMediaEntry, mediaType string) []tmdbResultEntry {
-	var out []tmdbResultEntry
+	out := make([]tmdbResultEntry, 0, len(entries))
 	for _, e := range entries {
 		title := e.Title
 		if title == "" {
@@ -227,19 +272,7 @@ func (s *Server) formatTMDBResults(entries []metadata.TMDBMediaEntry, mediaType 
 			Year:        year,
 			Rating:      e.VoteAverage,
 			Type:        mediaType,
-		}
-
-		// Check if it might be anime
-		if mediaType == "series" {
-			for _, g := range e.GenreIDs {
-				if g == 16 { // Animation genre ID in TMDB
-					for _, c := range e.OriginCountry {
-						if strings.ToUpper(c) == "JP" {
-							r.IsAnime = true
-						}
-					}
-				}
-			}
+			IsAnime:     metadata.IsAnimeEntry(e),
 		}
 
 		// Check if in library

@@ -1,6 +1,8 @@
 <script>
 	import { createEventDispatcher, onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import { mediaTypeLabel } from '$lib/media';
+	import { preferredVideoProfile } from '$lib/profiles';
 	import StatusBadge from './StatusBadge.svelte';
 
 	export let item = null;
@@ -9,11 +11,9 @@
 
 	const dispatch = createEventDispatcher();
 
-	let selectedProfile = (() => {
-		const keyword = item?.is_anime ? 'anime' : item?.type === 'movie' ? 'movie' : 'series';
-		const match = profiles.find(p => p.name.toLowerCase().includes(keyword));
-		return match?.id || profiles[0]?.id || 1;
-	})();
+	let selectedProfile = preferredVideoProfile(item, profiles);
+	// Profiles may arrive after the detail opens. Do not replace a user's selection.
+	$: if (!selectedProfile && profiles.length) selectedProfile = preferredVideoProfile(item, profiles);
 	let adding = false;
 	let searching = false;
 	let showSeasonPicker = false;
@@ -26,7 +26,7 @@
 
 	onMount(async () => {
 		// Fetch season info for series in discovery mode
-		if (mode === 'discovery' && item?.tmdb_id && (item.type === 'series' || item.is_anime)) {
+		if (mode === 'discovery' && item?.tmdb_id && item.type === 'series') {
 			try {
 				const meta = await api.metadata(item.tmdb_id, 'series');
 				const seasons = (meta.seasons || []).filter(s => item.is_anime || s.season_number > 0);
@@ -47,8 +47,9 @@
 	})();
 
 	async function addToLibrary() {
+		if (adding || loadingSeasons) return;
 		// For TMDB series with potentially multiple seasons, show season picker
-		if (item.tmdb_id && (item.type === 'series' || item.is_anime) && !showSeasonPicker) {
+		if (item.tmdb_id && item.type === 'series' && !showSeasonPicker) {
 			loadingSeasons = true;
 			try {
 				// Use prefetched data if available, otherwise fetch
@@ -75,7 +76,7 @@
 			} else {
 				payload.tmdb_id = item.tmdb_id;
 				payload.type = item.type || 'movie';
-				payload.anime = item.is_anime || false;
+				payload.anime = item.is_anime || item.anime || false;
 			}
 			payload.quality_profile_id = selectedProfile;
 			if (showSeasonPicker && selectedSeasons.size > 0) {
@@ -140,7 +141,7 @@
 					{#if item.rating}<span class="meta-item rating-val">★ {item.rating?.toFixed(1)}</span>{/if}
 					{#if seasonCount !== null}<span class="meta-item">{seasonCount} season{seasonCount !== 1 ? 's' : ''}</span>{/if}
 					{#if item.status}<StatusBadge status={item.status} />{/if}
-					<span class="media-type-tag">{item.is_anime ? 'Anime' : item.type === 'movie' ? 'Movie' : 'Series'}</span>
+					<span class="media-type-tag">{mediaTypeLabel(item)}</span>
 				</div>
 				{#if genres.length > 0}
 					<div class="genres">
@@ -181,7 +182,7 @@
 								</div>
 								<div class="add-row">
 									<select bind:value={selectedProfile}>
-										{#each profiles as p}
+										{#each profiles.filter(p => p.profile_type !== 'music') as p}
 											<option value={p.id}>{p.name}</option>
 										{/each}
 									</select>
@@ -194,7 +195,7 @@
 						{:else}
 							<div class="add-row">
 								<select bind:value={selectedProfile}>
-									{#each profiles as p}
+									{#each profiles.filter(p => p.profile_type !== 'music') as p}
 										<option value={p.id}>{p.name}</option>
 									{/each}
 								</select>

@@ -2,316 +2,338 @@ package server
 
 import (
 	"encoding/json"
-	"log/slog"
+	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"path/filepath"
+	"strconv"
+	"strings"
 
-	"mediaforge/internal/ai"
+	"mediaforge/internal/httpclient"
 	"mediaforge/internal/metadata"
+	"mediaforge/internal/qbt"
+	"mediaforge/internal/sabnzbd"
 )
 
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	settings := map[string]string{
-		"proxy":          "",
-		"media_root":     s.cfg.MediaRoot,
-		"tmdb_api_key":   s.cfg.TMDBApiKey,
-		"sabnzbd_url":    s.cfg.SABnzbdURL,
-		"sabnzbd_api_key": s.cfg.SABnzbdKey,
-		"setup_complete": "false",
-	}
+var secretSettings = map[string]string{
+	"tmdb_api_key": "tmdb_configured", "sabnzbd_api_key": "sabnzbd_configured",
+	"lastfm_api_key": "lastfm_configured", "qbittorrent_password": "qbittorrent_configured",
+	"openrouter_api_key": "openrouter_configured", "brave_api_key": "brave_configured",
+}
+var settingsDefaults = map[string]string{
+	"proxy": "", "media_root": "/data/media", "tmdb_api_key": "", "sabnzbd_url": "http://sabnzbd:8080", "sabnzbd_api_key": "",
+	"setup_complete": "false", "lastfm_api_key": "", "qbittorrent_enabled": "false", "qbittorrent_url": "http://qbittorrent:9090",
+	"qbittorrent_username": "admin", "qbittorrent_password": "", "torrent_seed_time_hours": "24", "torrent_remove_after_seed": "true",
+	"openrouter_api_key": "", "openrouter_model": "moonshotai/kimi-k3", "openrouter_reasoning_effort": "high", "brave_api_key": "",
+	"ai_personality_preset": "default", "ai_personality_custom": "",
+}
+var boolSettings = map[string]bool{"setup_complete": true, "qbittorrent_enabled": true, "torrent_remove_after_seed": true}
 
-	for key := range settings {
-		val, err := s.db.GetSetting(key)
-		if err == nil && val != "" {
-			settings[key] = val
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	response := map[string]interface{}{}
+	for key, fallback := range settingsDefaults {
+		value, err := s.db.GetSetting(key)
+		if err != nil {
+			writeError(w, 500, "read settings failed")
+			return
+		}
+		if value == "" {
+			value = fallback
+		}
+		if flag, secret := secretSettings[key]; secret {
+			response[key] = ""
+			response[flag] = value != ""
+		} else if boolSettings[key] {
+			response[key] = value == "true"
+		} else {
+			response[key] = value
 		}
 	}
-
-	// Music settings
-	lastfmKey, _ := s.db.GetSetting("lastfm_api_key")
-
-	// AI settings
-	orKey, _ := s.db.GetSetting("openrouter_api_key")
-	orModel, _ := s.db.GetSetting("openrouter_model")
-	braveKey, _ := s.db.GetSetting("brave_api_key")
-	aiPreset, _ := s.db.GetSetting("ai_personality_preset")
-	aiCustom, _ := s.db.GetSetting("ai_personality_custom")
-
-	if orModel == "" {
-		orModel = "anthropic/claude-sonnet-4-20250514"
-	}
-	if aiPreset == "" {
-		aiPreset = "default"
-	}
-
-	// qBittorrent settings
-	qbtEnabled, _ := s.db.GetSetting("qbittorrent_enabled")
-	qbtURL, _ := s.db.GetSetting("qbittorrent_url")
-	if qbtURL == "" {
-		qbtURL = "http://qbittorrent:8080"
-	}
-	qbtUsername, _ := s.db.GetSetting("qbittorrent_username")
-	if qbtUsername == "" {
-		qbtUsername = "admin"
-	}
-	qbtPassword, _ := s.db.GetSetting("qbittorrent_password")
-	seedTimeStr, _ := s.db.GetSetting("torrent_seed_time_hours")
-	if seedTimeStr == "" {
-		seedTimeStr = "24"
-	}
-	removeAfterStr, _ := s.db.GetSetting("torrent_remove_after_seed")
-	removeAfterSeed := removeAfterStr != "false"
-
-	// Mask API keys for display
-	response := map[string]interface{}{
-		"proxy":          settings["proxy"],
-		"media_root":     settings["media_root"],
-		"tmdb_api_key":   maskKey(settings["tmdb_api_key"]),
-		"tmdb_configured": settings["tmdb_api_key"] != "",
-		"sabnzbd_url":    settings["sabnzbd_url"],
-		"sabnzbd_api_key": maskKey(settings["sabnzbd_api_key"]),
-		"sabnzbd_configured": settings["sabnzbd_api_key"] != "",
-		"setup_complete": settings["setup_complete"] == "true",
-
-		// Music settings
-		"lastfm_api_key":    maskKey(lastfmKey),
-		"lastfm_configured": lastfmKey != "",
-
-		// qBittorrent settings
-		"qbittorrent_enabled":    qbtEnabled == "true",
-		"qbittorrent_url":        qbtURL,
-		"qbittorrent_username":   qbtUsername,
-		"qbittorrent_password":   maskKey(qbtPassword),
-		"qbittorrent_configured": qbtPassword != "",
-		"torrent_seed_time_hours": seedTimeStr,
-		"torrent_remove_after_seed": removeAfterSeed,
-
-		// AI settings
-		"openrouter_api_key":    maskKey(orKey),
-		"openrouter_configured": orKey != "",
-		"openrouter_model":      orModel,
-		"brave_api_key":         maskKey(braveKey),
-		"brave_configured":      braveKey != "",
-		"ai_personality_preset": aiPreset,
-		"ai_personality_custom": aiCustom,
-	}
-
 	writeJSON(w, 200, response)
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Proxy      *string `json:"proxy"`
-		MediaRoot  *string `json:"media_root"`
-		TMDBKey    *string `json:"tmdb_api_key"`
-		SabURL     *string `json:"sabnzbd_url"`
-		SabKey     *string `json:"sabnzbd_api_key"`
-		SetupDone  *bool   `json:"setup_complete"`
-
-		// Music settings
-		LastFMKey     *string `json:"lastfm_api_key"`
-
-		// qBittorrent settings
-		QBTEnabled       *bool   `json:"qbittorrent_enabled"`
-		QBTURL           *string `json:"qbittorrent_url"`
-		QBTUsername      *string `json:"qbittorrent_username"`
-		QBTPassword      *string `json:"qbittorrent_password"`
-		SeedTimeHours    *string `json:"torrent_seed_time_hours"`
-		RemoveAfterSeed  *bool   `json:"torrent_remove_after_seed"`
-
-		// AI settings
-		OpenRouterKey    *string `json:"openrouter_api_key"`
-		OpenRouterModel  *string `json:"openrouter_model"`
-		BraveKey         *string `json:"brave_api_key"`
-		AIPreset         *string `json:"ai_personality_preset"`
-		AICustom         *string `json:"ai_personality_custom"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, 400, "invalid JSON")
+	var request map[string]json.RawMessage
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&request); err != nil || request == nil {
+		writeError(w, 400, "invalid JSON object")
 		return
 	}
-
-	if req.Proxy != nil {
-		s.db.SetSetting("proxy", *req.Proxy)
-	}
-	if req.MediaRoot != nil {
-		s.db.SetSetting("media_root", *req.MediaRoot)
-	}
-	if req.TMDBKey != nil {
-		s.db.SetSetting("tmdb_api_key", *req.TMDBKey)
-	}
-	if req.SabURL != nil {
-		s.db.SetSetting("sabnzbd_url", *req.SabURL)
-	}
-	if req.SabKey != nil {
-		s.db.SetSetting("sabnzbd_api_key", *req.SabKey)
-	}
-	if req.SetupDone != nil && *req.SetupDone {
-		s.db.SetSetting("setup_complete", "true")
-	}
-
-	// Music settings
-	if req.LastFMKey != nil {
-		s.db.SetSetting("lastfm_api_key", *req.LastFMKey)
-	}
-
-	// qBittorrent settings
-	if req.QBTEnabled != nil {
-		if *req.QBTEnabled {
-			s.db.SetSetting("qbittorrent_enabled", "true")
+	changes := map[string]string{}
+	for key, raw := range request {
+		if strings.HasPrefix(key, "clear_") {
+			target := strings.TrimPrefix(key, "clear_")
+			if _, ok := secretSettings[target]; !ok {
+				writeError(w, 400, "unknown setting: "+key)
+				return
+			}
+			var clear bool
+			if string(raw) == "null" || json.Unmarshal(raw, &clear) != nil {
+				writeError(w, 400, key+" must be boolean")
+				return
+			}
+			if clear {
+				changes[target] = ""
+			}
+			continue
+		}
+		if _, ok := settingsDefaults[key]; !ok {
+			writeError(w, 400, "unknown setting: "+key)
+			return
+		}
+		var value string
+		if boolSettings[key] {
+			var b bool
+			if string(raw) == "null" || json.Unmarshal(raw, &b) != nil {
+				writeError(w, 400, key+" must be boolean")
+				return
+			}
+			value = strconv.FormatBool(b)
 		} else {
-			s.db.SetSetting("qbittorrent_enabled", "false")
+			if string(raw) == "null" || json.Unmarshal(raw, &value) != nil {
+				writeError(w, 400, key+" must be a string")
+				return
+			}
+		}
+		if _, secret := secretSettings[key]; secret {
+			if value == "" || value == "********" || strings.Contains(value, "...") {
+				continue
+			}
+		} else {
+			value = strings.TrimSpace(value)
+		}
+		if key == "sabnzbd_url" || key == "qbittorrent_url" {
+			if err := validateHTTPURL(value); err != nil {
+				writeError(w, 400, key+": "+err.Error())
+				return
+			}
+			value = strings.TrimRight(value, "/")
+		}
+		if key == "media_root" && (value == "" || !filepath.IsAbs(value)) {
+			writeError(w, 400, "media_root must be an absolute path")
+			return
+		}
+		if key == "torrent_seed_time_hours" {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 || n > 87600 {
+				writeError(w, 400, "seed time must be between 0 and 87600 hours")
+				return
+			}
+		}
+		if key == "openrouter_reasoning_effort" && value != "high" && value != "medium" && value != "low" && value != "none" {
+			writeError(w, 400, "reasoning effort must be high, medium, low, or none")
+			return
+		}
+		if key == "openrouter_model" && (value == "" || !strings.Contains(value, "/")) {
+			writeError(w, 400, "model must be a provider/model ID")
+			return
+		}
+		if key == "proxy" {
+			if _, err := httpclient.New(value); err != nil {
+				writeError(w, 400, "invalid proxy URL")
+				return
+			}
+		}
+		changes[key] = value
+	}
+	// Explicit clears win regardless of map iteration order.
+	for key, raw := range request {
+		if strings.HasPrefix(key, "clear_") && string(raw) == "true" {
+			changes[strings.TrimPrefix(key, "clear_")] = ""
 		}
 	}
-	if req.QBTURL != nil {
-		s.db.SetSetting("qbittorrent_url", *req.QBTURL)
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "save settings failed")
+		return
 	}
-	if req.QBTUsername != nil {
-		s.db.SetSetting("qbittorrent_username", *req.QBTUsername)
-	}
-	if req.QBTPassword != nil {
-		s.db.SetSetting("qbittorrent_password", *req.QBTPassword)
-	}
-	if req.SeedTimeHours != nil {
-		s.db.SetSetting("torrent_seed_time_hours", *req.SeedTimeHours)
-	}
-	if req.RemoveAfterSeed != nil {
-		if *req.RemoveAfterSeed {
-			s.db.SetSetting("torrent_remove_after_seed", "true")
-		} else {
-			s.db.SetSetting("torrent_remove_after_seed", "false")
+	defer tx.Rollback()
+	for key, value := range changes {
+		if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP`, key, value); err != nil {
+			writeError(w, 500, "save settings failed")
+			return
 		}
 	}
-
-	// AI settings
-	reinitAI := false
-	if req.OpenRouterKey != nil {
-		s.db.SetSetting("openrouter_api_key", *req.OpenRouterKey)
-		reinitAI = true
+	if err = tx.Commit(); err != nil {
+		writeError(w, 500, "save settings failed")
+		return
 	}
-	if req.OpenRouterModel != nil {
-		s.db.SetSetting("openrouter_model", *req.OpenRouterModel)
-	}
-	if req.BraveKey != nil {
-		s.db.SetSetting("brave_api_key", *req.BraveKey)
-		reinitAI = true
-	}
-	if req.AIPreset != nil {
-		s.db.SetSetting("ai_personality_preset", *req.AIPreset)
-	}
-	if req.AICustom != nil {
-		s.db.SetSetting("ai_personality_custom", *req.AICustom)
-	}
-
-	// Reload config
 	s.cfg.Reload(s.db)
-
-	// Update dependent services
-	s.grabber.UpdateConfig(s.cfg.SABnzbdURL, s.cfg.SABnzbdKey)
-	s.processor.UpdateMediaRoot(s.cfg.MediaRoot)
-	s.scanner.UpdateMediaRoot(s.cfg.MediaRoot)
-
-	// Update qBittorrent client
+	if _, ok := changes["proxy"]; ok {
+		if err := httpclient.UpdateProxy(s.proxyClient, s.cfg.Proxy); err != nil {
+			writeError(w, 500, "apply proxy failed")
+			return
+		}
+	}
+	if s.grabber != nil {
+		s.grabber.UpdateConfig(s.cfg.SABnzbdURL, s.cfg.SABnzbdKey)
+	}
+	if s.processor != nil {
+		s.processor.UpdateMediaRoot(s.cfg.MediaRoot)
+	}
+	if s.scanner != nil {
+		s.scanner.UpdateMediaRoot(s.cfg.MediaRoot)
+	}
 	if s.qbt != nil {
 		s.qbt.UpdateConfig(s.cfg.QBTURL, s.cfg.QBTUsername, s.cfg.QBTPassword)
 	}
-
-	// Reinitialize TMDB client if the key was set/changed
-	if s.cfg.TMDBApiKey != "" && (s.tmdb == nil || req.TMDBKey != nil) {
-		s.tmdb = metadata.NewTMDBClient(s.proxyClient, s.cfg.TMDBApiKey)
-		slog.Info("TMDB client initialized via settings update")
+	if _, ok := changes["tmdb_api_key"]; ok {
+		s.tmdb = nil
+		if s.cfg.TMDBApiKey != "" {
+			s.tmdb = metadata.NewTMDBClient(s.proxyClient, s.cfg.TMDBApiKey)
+		}
+		if s.metadataUpdater != nil {
+			s.metadataUpdater(s.tmdb)
+		}
 	}
-
-	// Reinitialize Last.fm client if key was set/changed
-	if s.cfg.LastFMApiKey != "" && (s.lastfm == nil || req.LastFMKey != nil) {
-		s.lastfm = metadata.NewLastFMClient(s.proxyClient, s.cfg.LastFMApiKey, s.db, s.cfg.ConfigDir)
-		slog.Info("Last.fm client initialized via settings update")
+	if _, ok := changes["lastfm_api_key"]; ok {
+		s.lastfm = nil
+		if s.cfg.LastFMApiKey != "" {
+			s.lastfm = metadata.NewLastFMClient(s.proxyClient, s.cfg.LastFMApiKey, s.db, s.cfg.ConfigDir)
+		}
 	}
-
-	// Reinitialize AI clients if keys changed
-	if reinitAI {
+	if _, ok := changes["openrouter_api_key"]; ok {
 		s.initAI()
-		slog.Info("AI clients reinitialized via settings update")
+	} else if _, ok := changes["brave_api_key"]; ok {
+		s.initAI()
 	}
-
 	writeJSON(w, 200, map[string]string{"status": "updated"})
 }
 
-// handleTestOpenRouter tests the OpenRouter API key with a minimal chat request.
-func (s *Server) handleTestOpenRouter(w http.ResponseWriter, r *http.Request) {
-	// Accept key from request body (unsaved input) or fall back to DB
-	var req struct {
-		Key string `json:"key"`
+func validateHTTPURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("use an http(s) URL without credentials, query, or fragment")
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	return nil
+}
 
-	orKey := req.Key
-	if orKey == "" {
-		orKey, _ = s.db.GetSetting("openrouter_api_key")
-	}
-	if orKey == "" {
-		writeJSON(w, 200, map[string]interface{}{"success": false, "error": "No API key configured"})
-		return
-	}
+type connectionTest struct {
+	APIKey          string `json:"api_key"`
+	Key             string `json:"key"`
+	URL             string `json:"url"`
+	Username        string `json:"username"`
+	Password        string `json:"password"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort"`
+}
 
-	// Use a minimal chat request to validate auth (models endpoint is public)
-	client := ai.NewOpenRouterClient(s.proxyClient, orKey)
-	_, err := client.Chat(ai.ChatRequest{
-		Model:     "openai/gpt-3.5-turbo",
-		Messages:  []ai.Message{{Role: "user", Content: "hi"}},
-		MaxTokens: 1,
-	})
+func decodeConnection(w http.ResponseWriter, r *http.Request) (connectionTest, bool) {
+	var req connectionTest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&req); err != nil && err != io.EOF {
+		writeError(w, 400, "invalid JSON")
+		return req, false
+	}
+	if req.APIKey == "" {
+		req.APIKey = req.Key
+	}
+	return req, true
+}
+func testResult(w http.ResponseWriter, err error) {
 	if err != nil {
-		errStr := err.Error()
-		// Auth failures typically contain 401 or "unauthorized"
-		writeJSON(w, 200, map[string]interface{}{"success": false, "error": errStr})
-		return
-	}
-
-	writeJSON(w, 200, map[string]interface{}{"success": true})
-}
-
-// handleTestQBittorrent tests the qBittorrent connection.
-func (s *Server) handleTestQBittorrent(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		URL      string `json:"url"`
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if s.qbt == nil {
-		writeJSON(w, 200, map[string]interface{}{"success": false, "error": "qBittorrent client not initialized"})
-		return
-	}
-
-	// Temporarily update config for the test if values provided
-	if req.URL != "" || req.Username != "" || req.Password != "" {
-		url := req.URL
-		if url == "" {
-			url = s.cfg.QBTURL
-		}
-		username := req.Username
-		if username == "" {
-			username = s.cfg.QBTUsername
-		}
-		password := req.Password
-		if password == "" {
-			password = s.cfg.QBTPassword
-		}
-		s.qbt.UpdateConfig(url, username, password)
-	}
-
-	if err := s.qbt.TestConnection(); err != nil {
 		writeJSON(w, 200, map[string]interface{}{"success": false, "error": err.Error()})
-		return
+	} else {
+		writeJSON(w, 200, map[string]bool{"success": true})
 	}
-
-	writeJSON(w, 200, map[string]interface{}{"success": true})
+}
+func savedOr(value, fallback string) string {
+	if value == "" || value == "********" || strings.Contains(value, "...") {
+		return fallback
+	}
+	return value
 }
 
-func maskKey(key string) string {
-	if len(key) <= 4 {
-		return key
+func (s *Server) handleTestQBittorrent(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeConnection(w, r)
+	if !ok {
+		return
 	}
-	return key[:4] + "..." + key[len(key)-2:]
+	endpoint := savedOr(req.URL, s.cfg.QBTURL)
+	if err := validateHTTPURL(endpoint); err != nil {
+		testResult(w, err)
+		return
+	}
+	client := qbt.New(s.directClient, endpoint, savedOr(req.Username, s.cfg.QBTUsername), savedOr(req.Password, s.cfg.QBTPassword))
+	testResult(w, client.TestConnection())
+}
+func (s *Server) handleTestSABnzbd(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeConnection(w, r)
+	if !ok {
+		return
+	}
+	endpoint := savedOr(req.URL, s.cfg.SABnzbdURL)
+	if err := validateHTTPURL(endpoint); err != nil {
+		testResult(w, err)
+		return
+	}
+	client := sabnzbd.New(s.directClient, endpoint, savedOr(req.APIKey, s.cfg.SABnzbdKey))
+	testResult(w, client.Test(r.Context()))
+}
+func (s *Server) handleTestTMDB(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeConnection(w, r)
+	if !ok {
+		return
+	}
+	key := savedOr(req.APIKey, s.cfg.TMDBApiKey)
+	if key == "" {
+		testResult(w, fmt.Errorf("enter a TMDB API key or access token"))
+		return
+	}
+	request, _ := http.NewRequestWithContext(r.Context(), "GET", "https://api.themoviedb.org/3/configuration", nil)
+	if len(key) == 32 {
+		q := request.URL.Query()
+		q.Set("api_key", key)
+		request.URL.RawQuery = q.Encode()
+	} else {
+		request.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := s.proxyClient.Do(request)
+	if err != nil {
+		testResult(w, fmt.Errorf("TMDB connection failed; check network or proxy"))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		testResult(w, fmt.Errorf("TMDB returned HTTP %d", resp.StatusCode))
+		return
+	}
+	testResult(w, nil)
+}
+func (s *Server) handleTestOpenRouter(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeConnection(w, r)
+	if !ok {
+		return
+	}
+	stored, _ := s.db.GetSetting("openrouter_api_key")
+	key := savedOr(req.APIKey, stored)
+	if key == "" {
+		testResult(w, fmt.Errorf("enter an OpenRouter API key"))
+		return
+	}
+	// The authenticated key endpoint validates credentials without billing a chat.
+	request, _ := http.NewRequestWithContext(r.Context(), "GET", "https://openrouter.ai/api/v1/key", nil)
+	request.Header.Set("Authorization", "Bearer "+key)
+	resp, err := s.proxyClient.Do(request)
+	if err != nil {
+		testResult(w, fmt.Errorf("OpenRouter connection failed; check network or proxy"))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		testResult(w, fmt.Errorf("OpenRouter returned HTTP %d", resp.StatusCode))
+		return
+	}
+	testResult(w, nil)
+}
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	key, _ := s.db.GetSetting("openrouter_api_key")
+	var count int
+	s.db.QueryRow(`SELECT COUNT(*) FROM indexers WHERE enabled=1`).Scan(&count)
+	writeJSON(w, 200, map[string]interface{}{"setup_complete": s.db.IsSetupComplete(), "tmdb_configured": s.cfg.TMDBApiKey != "", "openrouter_configured": key != "", "sabnzbd_configured": s.cfg.SABnzbdKey != "", "qbittorrent_configured": s.cfg.QBTPassword != "", "indexer_count": count, "media_root": s.cfg.MediaRoot})
+}
+func maskKey(key string) string {
+	if key == "" {
+		return ""
+	}
+	return "********"
 }

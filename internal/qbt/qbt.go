@@ -9,17 +9,19 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
 // Client communicates with a qBittorrent instance via its Web API.
 type Client struct {
-	client   *http.Client
-	baseURL  string
-	username string
-	password string
-	sid      string // SID cookie from auth
-	mu       sync.Mutex
+	client     *http.Client
+	baseURL    string
+	username   string
+	password   string
+	sid        string // session cookie from auth
+	cookieName string
+	mu         sync.Mutex
 }
 
 // Torrent represents a torrent in qBittorrent.
@@ -43,7 +45,7 @@ type Torrent struct {
 func New(httpClient *http.Client, baseURL, username, password string) *Client {
 	return &Client{
 		client:   httpClient,
-		baseURL:  baseURL,
+		baseURL:  strings.TrimRight(baseURL, "/"),
 		username: username,
 		password: password,
 	}
@@ -53,7 +55,7 @@ func New(httpClient *http.Client, baseURL, username, password string) *Client {
 func (c *Client) UpdateConfig(baseURL, username, password string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.baseURL = baseURL
+	c.baseURL = strings.TrimRight(baseURL, "/")
 	c.username = username
 	c.password = password
 	c.sid = "" // force re-login
@@ -78,15 +80,16 @@ func (c *Client) login() error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "Ok." {
-		return fmt.Errorf("qbt login failed: %s", string(body))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if (resp.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "Ok.") && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("qbt authentication failed (HTTP %d)", resp.StatusCode)
 	}
 
 	// Extract SID from cookies
 	for _, cookie := range resp.Cookies() {
-		if cookie.Name == "SID" {
+		if cookie.Name == "SID" || strings.HasPrefix(cookie.Name, "QBT_SID_") {
 			c.sid = cookie.Value
+			c.cookieName = cookie.Name
 			slog.Debug("qbt login successful")
 			return nil
 		}
@@ -99,10 +102,11 @@ func (c *Client) login() error {
 func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	c.mu.Lock()
 	sid := c.sid
+	cookieName := c.cookieName
 	c.mu.Unlock()
 
 	if sid != "" {
-		req.AddCookie(&http.Cookie{Name: "SID", Value: sid})
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: sid})
 	}
 
 	resp, err := c.client.Do(req)
@@ -111,19 +115,30 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	}
 
 	// Auto-reauth on 403
-	if resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
 		c.mu.Lock()
 		err = c.login()
 		sid = c.sid
+		cookieName = c.cookieName
 		c.mu.Unlock()
 		if err != nil {
 			return nil, fmt.Errorf("qbt reauth: %w", err)
 		}
 
+		// A POST body has already been consumed by the first request.
+		if req.GetBody != nil {
+			req.Body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+		} else if req.Body != nil {
+			return nil, fmt.Errorf("qbt cannot replay request body after authentication")
+		}
+
 		// Rebuild cookies on the original request
 		req.Header.Del("Cookie")
-		req.AddCookie(&http.Cookie{Name: "SID", Value: sid})
+		req.AddCookie(&http.Cookie{Name: cookieName, Value: sid})
 
 		resp, err = c.client.Do(req)
 		if err != nil {
@@ -131,6 +146,10 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("qbt API returned HTTP %d", resp.StatusCode)
+	}
 	return resp, nil
 }
 
@@ -152,10 +171,10 @@ func (c *Client) AddTorrent(torrentData []byte, filename string, downloadID int)
 	// Category and tags
 	w.WriteField("category", "zarr")
 	w.WriteField("tags", fmt.Sprintf("dl_%d", downloadID))
-	w.WriteField("savepath", "/data/torrents")
+	// Respect the client/category save path configured by the user.
 	w.Close()
 
-	req, err := http.NewRequest("POST", c.baseURL+"/api/v2/torrents/add", &buf)
+	req, err := http.NewRequest("POST", c.endpoint("/api/v2/torrents/add"), &buf)
 	if err != nil {
 		return "", err
 	}
@@ -167,18 +186,29 @@ func (c *Client) AddTorrent(torrentData []byte, filename string, downloadID int)
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "Ok." {
-		return "", fmt.Errorf("qbt add torrent: %s", string(body))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	hash := ""
+	if resp.StatusCode != http.StatusNoContent && strings.TrimSpace(string(body)) != "Ok." {
+		var result struct {
+			Added    []string `json:"added_torrent_ids"`
+			Failures int      `json:"failure_count"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil || len(result.Added) == 0 || result.Failures > 0 {
+			return "", fmt.Errorf("qbt rejected torrent (HTTP %d)", resp.StatusCode)
+		}
+		hash = result.Added[0]
 	}
 
 	slog.Info("torrent sent to qBittorrent", "filename", filename, "download_id", downloadID)
-	return "", nil // hash is extracted later via polling
+	return hash, nil // legacy versions require polling to discover the hash
 }
 
 // GetTorrents returns all torrents in the "zarr" category.
 func (c *Client) GetTorrents() ([]Torrent, error) {
-	req, err := http.NewRequest("GET", c.baseURL+"/api/v2/torrents/info?category=zarr", nil)
+	req, err := http.NewRequest("GET", c.endpoint("/api/v2/torrents/info?category=zarr"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +234,7 @@ func (c *Client) DeleteTorrent(hash string, deleteFiles bool) error {
 		"deleteFiles": {fmt.Sprintf("%t", deleteFiles)},
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/api/v2/torrents/delete", bytes.NewBufferString(data.Encode()))
+	req, err := http.NewRequest("POST", c.endpoint("/api/v2/torrents/delete"), bytes.NewBufferString(data.Encode()))
 	if err != nil {
 		return err
 	}
@@ -227,7 +257,7 @@ func (c *Client) TestConnection() error {
 		return err
 	}
 
-	req, err := http.NewRequest("GET", c.baseURL+"/api/v2/app/version", nil)
+	req, err := http.NewRequest("GET", c.endpoint("/api/v2/app/version"), nil)
 	if err != nil {
 		return err
 	}
@@ -245,4 +275,10 @@ func (c *Client) TestConnection() error {
 	body, _ := io.ReadAll(resp.Body)
 	slog.Info("qBittorrent connected", "version", string(body))
 	return nil
+}
+
+func (c *Client) endpoint(path string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.baseURL + path
 }

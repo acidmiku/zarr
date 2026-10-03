@@ -60,15 +60,18 @@
 				return;
 			}
 
-			// Use the first result (best match)
-			const item = results[0];
+			// Anime results mix TV and movies. Prefer the requested title over
+			// the first franchise match, which may be the original TV series.
+			const normalizeTitle = (title) => title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+			const wanted = normalizeTitle(rec.title);
+			const item = results.find(result => normalizeTitle(result.title) === wanted) || results[0];
 
 			// Prepare item for MediaDetail modal
 			const detailItem = {
 				...item,
 				tmdb_id: item.tmdb_id,
 				anilist_id: item.anilist_id,
-				type: rec.media_type === 'anime' ? 'series' : rec.media_type,
+				type: item.type || (rec.media_type === 'anime' ? 'series' : rec.media_type),
 				is_anime: rec.media_type === 'anime' || item.is_anime
 			};
 

@@ -1,0 +1,154 @@
+.connection-settings {
+	min-width: 0;
+}
+.connection-section {
+	padding: 1.25rem;
+	margin: 1rem 0;
+	border: 1px solid var(--glass-border);
+	border-radius: var(--radius-lg);
+	background: var(--glass-bg);
+	min-width: 0;
+}
+.connection-section h2,
+.connection-section summary {
+	font-family: var(--font-display);
+	font-size: 1.2rem;
+	font-weight: 700;
+}
+.connection-section summary {
+	cursor: pointer;
+}
+.connection-section h3 {
+	margin: 1.2rem 0 0.65rem;
+	font-size: 1rem;
+}
+.connection-section p {
+	margin: 0.7rem 0;
+	line-height: 1.6;
+}
+.connection-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+	gap: 0.9rem;
+	margin: 0.9rem 0;
+}
+.connection-settings label,
+.connection-section label {
+	display: block;
+	color: var(--text-secondary);
+	font-size: 0.85rem;
+	line-height: 1.5;
+	min-width: 0;
+}
+.connection-settings input:not([type='checkbox']),
+.connection-settings select,
+.connection-settings textarea,
+.connection-section input:not([type='checkbox']),
+.connection-section select {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	min-height: 2.75rem;
+	margin-top: 0.4rem;
+	padding: 0.7rem 0.8rem;
+	border: 1px solid var(--glass-border);
+	border-radius: var(--radius-sm);
+	background: var(--bg-input);
+	color: var(--text-primary);
+	font: inherit;
+}
+.connection-grid label > .connection-hint {
+	display: block;
+	margin-top: 0.4rem;
+}
+.connection-settings input:focus,
+.connection-settings select:focus,
+.connection-settings textarea:focus,
+.connection-section input:focus,
+.connection-section select:focus {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+.connection-settings .connection-check,
+.connection-section .connection-check {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0.65rem 0;
+}
+.connection-check input {
+	accent-color: var(--accent);
+}
+.connection-hint {
+	color: var(--text-muted);
+	font-size: 0.82rem;
+	line-height: 1.55;
+}
+.connection-status {
+	color: var(--accent);
+	font: 500 0.72rem var(--font-body);
+	margin-left: 0.35rem;
+}
+.connection-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.65rem;
+	margin: 0.85rem 0 0.1rem;
+}
+.connection-actions a {
+	color: var(--accent);
+	font-size: 0.8rem;
+}
+.connection-button {
+	padding: 0.6rem 0.9rem;
+	border: 1px solid var(--glass-border);
+	border-radius: var(--radius-sm);
+	background: var(--bg-elevated);
+	color: var(--text-primary);
+	font: 600 0.83rem var(--font-body);
+	cursor: pointer;
+}
+.connection-button.primary {
+	background: var(--accent);
+	color: var(--text-inverse);
+	border-color: var(--accent);
+}
+.connection-button.danger {
+	color: var(--danger);
+}
+.connection-button:disabled {
+	opacity: 0.5;
+	cursor: wait;
+}
+.connection-error {
+	color: var(--danger);
+	font-size: 0.85rem;
+	overflow-wrap: anywhere;
+}
+.connection-success {
+	color: var(--success);
+	font-size: 0.85rem;
+}
+.connection-item {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: center;
+	gap: 0.75rem;
+	padding: 0.9rem 0;
+	border-bottom: 1px solid var(--glass-border);
+}
+.connection-item > div {
+	min-width: 0;
+}
+.connection-item p {
+	overflow-wrap: anywhere;
+	margin: 0.25rem 0;
+}
+.connection-editor {
+	margin-top: 1rem;
+	padding-top: 0.75rem;
+	border-top: 1px solid var(--glass-border);
+}

@@ -1,9 +1,12 @@
 package ai
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -11,10 +14,33 @@ import (
 type SessionManager struct {
 	db     *sql.DB
 	openai *OpenRouterClient
+	turns  *sync.Map
 }
 
 func NewSessionManager(db *sql.DB, openai *OpenRouterClient) *SessionManager {
-	return &SessionManager{db: db, openai: openai}
+	return &SessionManager{db: db, openai: openai, turns: &sync.Map{}}
+}
+
+// WithClient retains active conversation locks when credentials are changed or
+// restored. Requests already running keep their original client snapshot.
+func (m *SessionManager) WithClient(client *OpenRouterClient) *SessionManager {
+	return &SessionManager{db: m.db, openai: client, turns: m.turns}
+}
+
+// BeginTurn serializes requests for one conversation without holding a database lock.
+func (m *SessionManager) BeginTurn(id int) bool {
+	_, busy := m.turns.LoadOrStore(id, true)
+	return !busy
+}
+func (m *SessionManager) EndTurn(id int) { m.turns.Delete(id) }
+
+func parseStoredTime(value string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // Session represents a conversation session.
@@ -27,14 +53,16 @@ type Session struct {
 
 // StoredMessage represents a persisted message.
 type StoredMessage struct {
-	ID            int       `json:"id"`
-	SessionID     int       `json:"session_id"`
-	Role          string    `json:"role"`
-	Content       string    `json:"content"`
-	ToolCalls     string    `json:"tool_calls,omitempty"`
-	ToolCallID    string    `json:"tool_call_id,omitempty"`
-	TokenEstimate int       `json:"token_estimate"`
-	CreatedAt     time.Time `json:"created_at"`
+	Reasoning        string            `json:"reasoning,omitempty"`
+	ReasoningDetails []json.RawMessage `json:"reasoning_details,omitempty"`
+	ID               int               `json:"id"`
+	SessionID        int               `json:"session_id"`
+	Role             string            `json:"role"`
+	Content          string            `json:"content"`
+	ToolCalls        string            `json:"tool_calls,omitempty"`
+	ToolCallID       string            `json:"tool_call_id,omitempty"`
+	TokenEstimate    int               `json:"token_estimate"`
+	CreatedAt        time.Time         `json:"created_at"`
 }
 
 // CreateSession creates a new conversation session.
@@ -67,11 +95,11 @@ func (m *SessionManager) ListSessions() ([]Session, error) {
 		if err := rows.Scan(&s.ID, &s.Title, &created, &updated); err != nil {
 			continue
 		}
-		s.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
-		s.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updated)
+		s.CreatedAt = parseStoredTime(created)
+		s.UpdatedAt = parseStoredTime(updated)
 		sessions = append(sessions, s)
 	}
-	return sessions, nil
+	return sessions, rows.Err()
 }
 
 // GetSession returns a session by ID with all messages.
@@ -87,10 +115,10 @@ func (m *SessionManager) GetSession(id int) (*Session, []StoredMessage, error) {
 	if title.Valid {
 		s.Title = title.String
 	}
-	s.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", created)
-	s.UpdatedAt, _ = time.Parse("2006-01-02 15:04:05", updated)
+	s.CreatedAt = parseStoredTime(created)
+	s.UpdatedAt = parseStoredTime(updated)
 
-	rows, err := m.db.Query(`SELECT id, session_id, role, content, COALESCE(tool_calls, ''), COALESCE(tool_call_id, ''), COALESCE(token_estimate, 0), created_at
+	rows, err := m.db.Query(`SELECT id, session_id, role, content, COALESCE(tool_calls, ''), COALESCE(tool_call_id, ''), COALESCE(token_estimate, 0), created_at, COALESCE(reasoning, ''), COALESCE(reasoning_details, '[]')
 		FROM ai_messages WHERE session_id = ? ORDER BY id ASC`, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get messages: %w", err)
@@ -100,12 +128,21 @@ func (m *SessionManager) GetSession(id int) (*Session, []StoredMessage, error) {
 	var messages []StoredMessage
 	for rows.Next() {
 		var msg StoredMessage
-		var createdStr string
-		if err := rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.ToolCalls, &msg.ToolCallID, &msg.TokenEstimate, &createdStr); err != nil {
+		var createdStr, details string
+		if err := rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.ToolCalls, &msg.ToolCallID, &msg.TokenEstimate, &createdStr, &msg.Reasoning, &details); err != nil {
 			continue
 		}
-		msg.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdStr)
+		msg.CreatedAt = parseStoredTime(createdStr)
+		if err := json.Unmarshal([]byte(details), &msg.ReasoningDetails); err != nil {
+			return nil, nil, fmt.Errorf("read reasoning: %w", err)
+		}
 		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if messages == nil {
+		messages = []StoredMessage{}
 	}
 	return &s, messages, nil
 }
@@ -118,44 +155,64 @@ func (m *SessionManager) DeleteSession(id int) error {
 
 // SaveMessage stores a message in the database.
 func (m *SessionManager) SaveMessage(sessionID int, role, content, toolCalls, toolCallID string) (*StoredMessage, error) {
-	tokenEst := len(content) / 4
+	msg := Message{Role: role, Content: content, ToolCallID: toolCallID}
 	if toolCalls != "" {
-		tokenEst += len(toolCalls) / 4
+		if err := json.Unmarshal([]byte(toolCalls), &msg.ToolCalls); err != nil {
+			return nil, err
+		}
 	}
-
-	var tcVal, tcidVal interface{}
-	if toolCalls != "" {
-		tcVal = toolCalls
-	}
-	if toolCallID != "" {
-		tcidVal = toolCallID
-	}
-
-	res, err := m.db.Exec(`INSERT INTO ai_messages (session_id, role, content, tool_calls, tool_call_id, token_estimate)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		sessionID, role, content, tcVal, tcidVal, tokenEst)
+	saved, err := m.SaveMessages(sessionID, []Message{msg})
 	if err != nil {
-		return nil, fmt.Errorf("save message: %w", err)
+		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	return &saved[0], nil
+}
 
-	// Update session timestamp
-	m.db.Exec(`UPDATE ai_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessionID)
-
-	return &StoredMessage{
-		ID:            int(id),
-		SessionID:     sessionID,
-		Role:          role,
-		Content:       content,
-		ToolCalls:     toolCalls,
-		ToolCallID:    toolCallID,
-		TokenEstimate: tokenEst,
-		CreatedAt:     time.Now(),
-	}, nil
+// SaveMessages atomically persists an assistant tool request together with all
+// results, so interrupted or failed turns never leave an invalid tool chain.
+func (m *SessionManager) SaveMessages(sessionID int, messages []Message) ([]StoredMessage, error) {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	saved := make([]StoredMessage, 0, len(messages))
+	for _, msg := range messages {
+		tc, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return nil, err
+		}
+		details, err := json.Marshal(msg.ReasoningDetails)
+		if err != nil {
+			return nil, err
+		}
+		encoded, _ := json.Marshal(msg)
+		tokenEst := (len(encoded) + 3) / 4
+		res, err := tx.Exec(`INSERT INTO ai_messages (session_id,role,content,tool_calls,tool_call_id,token_estimate,reasoning,reasoning_details) VALUES (?,?,?,?,?,?,?,?)`, sessionID, msg.Role, msg.Content, string(tc), msg.ToolCallID, tokenEst, msg.Reasoning, string(details))
+		if err != nil {
+			return nil, fmt.Errorf("save message: %w", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		saved = append(saved, StoredMessage{ID: int(id), SessionID: sessionID, Role: msg.Role, Content: msg.Content, ToolCalls: string(tc), ToolCallID: msg.ToolCallID, Reasoning: msg.Reasoning, ReasoningDetails: msg.ReasoningDetails, TokenEstimate: tokenEst, CreatedAt: time.Now()})
+	}
+	if _, err = tx.Exec(`UPDATE ai_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sessionID); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return saved, nil
 }
 
 // BuildContext assembles messages for an API call, compressing if needed.
 func (m *SessionManager) BuildContext(sessionID int, systemPrompt string, modelID string) ([]Message, error) {
+	return m.BuildContextContext(context.Background(), sessionID, systemPrompt, modelID)
+}
+
+func (m *SessionManager) BuildContextContext(ctx context.Context, sessionID int, systemPrompt string, modelID string) ([]Message, error) {
 	_, messages, err := m.GetSession(sessionID)
 	if err != nil {
 		return nil, err
@@ -170,9 +227,12 @@ func (m *SessionManager) BuildContext(sessionID int, systemPrompt string, modelI
 			Role:       msg.Role,
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
+			Reasoning:  msg.Reasoning, ReasoningDetails: msg.ReasoningDetails,
 		}
 		if msg.ToolCalls != "" {
-			json.Unmarshal([]byte(msg.ToolCalls), &apiMsg.ToolCalls)
+			if err := json.Unmarshal([]byte(msg.ToolCalls), &apiMsg.ToolCalls); err != nil {
+				return nil, fmt.Errorf("read tool calls: %w", err)
+			}
 		}
 		apiMessages = append(apiMessages, apiMsg)
 	}
@@ -180,19 +240,23 @@ func (m *SessionManager) BuildContext(sessionID int, systemPrompt string, modelI
 	// Estimate total tokens
 	totalTokens := 0
 	for _, msg := range apiMessages {
-		totalTokens += len(msg.Content) / 4
+		encoded, _ := json.Marshal(msg)
+		totalTokens += (len(encoded) + 3) / 4
 		for _, tc := range msg.ToolCalls {
 			totalTokens += len(tc.Function.Arguments) / 4
 		}
 	}
 
 	// Get model context budget
-	contextLength := m.openai.GetModelContextLength(modelID)
-	budget := contextLength - 2000 // reserve for response
+	contextLength := m.openai.GetModelContextLengthContext(ctx, modelID)
+	budget := contextLength - 16384 // reserve for reasoning and response
+	if budget < 1024 {
+		budget = contextLength / 2
+	}
 	threshold := int(float64(budget) * 0.7)
 
 	if totalTokens > threshold && len(apiMessages) > 10 {
-		apiMessages, err = m.compressContext(sessionID, apiMessages, systemPrompt, modelID)
+		apiMessages, err = m.compressContext(ctx, sessionID, apiMessages, systemPrompt, modelID)
 		if err != nil {
 			// If compression fails, just return what we have
 			return apiMessages, nil
@@ -203,17 +267,28 @@ func (m *SessionManager) BuildContext(sessionID int, systemPrompt string, modelI
 }
 
 // compressContext summarizes middle messages to fit within the context budget.
-func (m *SessionManager) compressContext(sessionID int, messages []Message, systemPrompt string, modelID string) ([]Message, error) {
+func (m *SessionManager) compressContext(ctx context.Context, sessionID int, messages []Message, systemPrompt string, modelID string) ([]Message, error) {
 	if len(messages) <= 10 {
 		return messages, nil
 	}
 
-	// Keep: system (index 0), first 2 exchanges (index 1-4), last 8 messages
-	keepStart := 5 // system + 2 exchanges
-	if keepStart > len(messages)-8 {
-		return messages, nil // not enough messages to compress
+	// Keep complete recent turns. Splitting a tool call from its results makes
+	// the conversation invalid for providers, so only cut at a user message.
+	keepStart := 1
+	keepEnd := 1
+	userTurns := 0
+	for i := len(messages) - 1; i > 0; i-- {
+		if messages[i].Role == "user" {
+			userTurns++
+			if userTurns == 2 {
+				keepEnd = i
+				break
+			}
+		}
 	}
-	keepEnd := len(messages) - 8
+	if keepEnd <= keepStart {
+		return messages, nil
+	}
 
 	// Extract middle messages for summarization
 	var middleParts []string
@@ -235,11 +310,11 @@ func (m *SessionManager) compressContext(sessionID int, messages []Message, syst
 			{Role: "system", Content: "Summarize this conversation in 300 words. Preserve: all titles recommended, user preferences stated, things the user rejected or disliked, and any specific requests."},
 			{Role: "user", Content: fmt.Sprintf("Conversation to summarize:\n\n%s", joinStrings(middleParts, "\n\n"))},
 		},
-		MaxTokens:   500,
+		MaxTokens:   4096,
 		Temperature: 0.3,
 	}
 
-	summaryMsg, err := m.openai.Chat(summaryReq)
+	summaryMsg, err := m.openai.ChatContext(ctx, summaryReq)
 	if err != nil {
 		return messages, nil // return uncompressed on failure
 	}
@@ -253,8 +328,8 @@ func (m *SessionManager) compressContext(sessionID int, messages []Message, syst
 	})
 	compressed = append(compressed, messages[keepEnd:]...)
 
-	// Save summary as a system message in DB for persistence
-	m.SaveMessage(sessionID, "system", fmt.Sprintf("[Conversation summary: %s]", summaryMsg.Content), "", "")
+	// The stored transcript remains canonical. Appending a summary without
+	// replacing summarized rows duplicates history and grows every subsequent request.
 
 	return compressed, nil
 }
@@ -298,7 +373,7 @@ func (m *SessionManager) MaybeGenerateTitle(sessionID int, modelID string) {
 		Messages: append([]Message{
 			{Role: "system", Content: "Give this conversation a 5-word title. Respond with ONLY the title, nothing else."},
 		}, contextMsgs...),
-		MaxTokens:   20,
+		MaxTokens:   4096,
 		Temperature: 0.5,
 	}
 
@@ -307,7 +382,10 @@ func (m *SessionManager) MaybeGenerateTitle(sessionID int, modelID string) {
 		return
 	}
 
-	newTitle := titleMsg.Content
+	newTitle := strings.TrimSpace(titleMsg.Content)
+	if newTitle == "" {
+		return
+	}
 	if len(newTitle) > 100 {
 		newTitle = newTitle[:100]
 	}

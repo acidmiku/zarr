@@ -108,7 +108,7 @@ func ToolDefs(braveAvailable bool) []Tool {
 							"type": "object",
 							"properties": {
 								"title": {"type": "string", "description": "Title of the movie/series/anime/album. For music, use 'Artist - Album' format."},
-								"media_type": {"type": "string", "enum": ["movie", "series", "music"], "description": "Type of media. Use 'series' for both TV shows and anime. Use 'music' for albums."},
+								"media_type": {"type": "string", "enum": ["movie", "series", "music"], "description": "Type of media. Use 'movie' for films including anime films, 'series' for TV shows including anime series, and 'music' for albums. Set anime separately."},
 								"score": {"type": "integer", "minimum": 1, "maximum": 5, "description": "Rating 1-5 stars. Default 5 if user doesn't specify. Infer from sentiment: loved=5, great=4, ok=3, meh=2, bad=1."},
 								"comment": {"type": "string", "description": "Optional user comment or note about the title"},
 								"anime": {"type": "boolean", "description": "Whether this is anime. Default false."}
@@ -145,21 +145,21 @@ func ToolDefs(braveAvailable bool) []Tool {
 
 // Recommendation is a single recommendation from the AI.
 type Recommendation struct {
-	MalID          int    `json:"mal_id,omitempty"`
-	Title          string `json:"title"`
-	MediaType      string `json:"media_type"`
-	Reason         string `json:"reason"`
-	PosterURL      string `json:"poster_url,omitempty"`
+	MalID          int     `json:"mal_id,omitempty"`
+	Title          string  `json:"title"`
+	MediaType      string  `json:"media_type"`
+	Reason         string  `json:"reason"`
+	PosterURL      string  `json:"poster_url,omitempty"`
 	Score          float64 `json:"score,omitempty"`
-	ReleaseGroupID string `json:"release_group_id,omitempty"`
+	ReleaseGroupID string  `json:"release_group_id,omitempty"`
 }
 
 // ToolExecutor handles tool call execution.
 type ToolExecutor struct {
-	Jikan      *JikanClient
-	Brave      *BraveClient
-	DB         *sql.DB
-	TMDB       *metadata.TMDBClient
+	Jikan       *JikanClient
+	Brave       *BraveClient
+	DB          *sql.DB
+	TMDB        *metadata.TMDBClient
 	MusicBrainz *metadata.MusicBrainzClient
 }
 
@@ -221,6 +221,9 @@ func (e *ToolExecutor) execShowRecommendations(argsJSON string) (string, []Recom
 }
 
 func (e *ToolExecutor) execSearchMAL(argsJSON string) (string, []Recommendation, error) {
+	if e.Jikan == nil {
+		return "MAL search is not configured.", nil, nil
+	}
 	var args struct {
 		Query    string  `json:"query"`
 		Type     string  `json:"type"`
@@ -407,13 +410,15 @@ func (e *ToolExecutor) execGetUserRatings(argsJSON string) (string, []Recommenda
 	// Query movie/series/anime ratings (skip when type is "music")
 	if args.Type != "music" {
 		query := `SELECT r.tmdb_id, r.media_type, r.rating, r.comment,
-			COALESCE(m.title, 'Unknown Title') as title
+			COALESCE(NULLIF(r.title,''),m.title, 'Unknown Title') as title
 			FROM user_ratings r
 			LEFT JOIN media_items m ON m.tmdb_id = r.tmdb_id AND m.type = r.media_type
 			WHERE r.rating >= ?`
 		qargs := []interface{}{args.MinRating}
 
-		if args.Type != "all" {
+		if args.Type == "anime" {
+			query += " AND COALESCE(r.anime,m.anime,0) = 1"
+		} else if args.Type != "all" {
 			query += " AND r.media_type = ?"
 			qargs = append(qargs, args.Type)
 		}
@@ -430,6 +435,9 @@ func (e *ToolExecutor) execGetUserRatings(argsJSON string) (string, []Recommenda
 			var mediaType, title string
 			var comment sql.NullString
 			if err := rows.Scan(&tmdbID, &mediaType, &rating, &comment, &title); err != nil {
+				continue
+			}
+			if rating < 1 || rating > 5 {
 				continue
 			}
 			stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
@@ -455,6 +463,9 @@ func (e *ToolExecutor) execGetUserRatings(argsJSON string) (string, []Recommenda
 				var rating int
 				var comment sql.NullString
 				if err := musicRows.Scan(&title, &artistName, &rating, &comment); err != nil {
+					continue
+				}
+				if rating < 1 || rating > 5 {
 					continue
 				}
 				stars := strings.Repeat("★", rating) + strings.Repeat("☆", 5-rating)
@@ -501,10 +512,12 @@ func (e *ToolExecutor) execSaveRatings(argsJSON string) (string, []Recommendatio
 			continue
 		}
 		if r.MediaType != "movie" && r.MediaType != "series" && r.MediaType != "music" {
-			r.MediaType = "series"
+			failed = append(failed, r.Title+" (invalid media type)")
+			continue
 		}
 		if r.Score < 1 || r.Score > 5 {
-			r.Score = 5
+			failed = append(failed, r.Title+" (rating must be 1-5)")
+			continue
 		}
 
 		if r.MediaType == "music" {
@@ -522,46 +535,16 @@ func (e *ToolExecutor) execSaveRatings(argsJSON string) (string, []Recommendatio
 
 			rg := result.ReleaseGroups[0]
 			artistName := ""
-			artistMBID := ""
 			if len(rg.ArtistCredit) > 0 {
 				artistName = rg.ArtistCredit[0].Artist.Name
-				artistMBID = rg.ArtistCredit[0].Artist.ID
 			}
 			albumTitle := rg.Title
 			rgID := rg.ID
-			imageURL := fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", rgID)
-			year := 0
-			if len(rg.FirstRelease) >= 4 {
-				fmt.Sscanf(rg.FirstRelease[:4], "%d", &year)
-			}
-
-			// Find or create artist
-			var artistID int
-			err = e.DB.QueryRow(`SELECT id FROM artists WHERE mbid = ?`, artistMBID).Scan(&artistID)
-			if err != nil {
-				res, err := e.DB.Exec(`INSERT INTO artists (mbid, name, sort_name) VALUES (?, ?, ?)`,
-					artistMBID, artistName, artistName)
-				if err != nil {
-					failed = append(failed, r.Title)
-					continue
-				}
-				id, _ := res.LastInsertId()
-				artistID = int(id)
-			}
-
-			// Find or create album
+			// Rating alone must never create a wanted album and trigger downloads.
 			var albumID int
-			err = e.DB.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, rgID).Scan(&albumID)
-			if err != nil {
-				res, err := e.DB.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, image_url, status)
-					VALUES (?, ?, ?, ?, ?, ?, 'wanted')`,
-					artistID, rgID, albumTitle, year, rg.PrimaryType, imageURL)
-				if err != nil {
-					failed = append(failed, r.Title)
-					continue
-				}
-				id, _ := res.LastInsertId()
-				albumID = int(id)
+			if err := e.DB.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, rgID).Scan(&albumID); err != nil {
+				failed = append(failed, r.Title+" (add this album to the music library before rating it)")
+				continue
 			}
 
 			// Set rating on album

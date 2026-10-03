@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"mediaforge/internal/indexer"
 	"mediaforge/internal/rutracker"
@@ -29,15 +31,15 @@ func (s *Server) handleGetEpisodes(w http.ResponseWriter, r *http.Request) {
 	defer seasonRows.Close()
 
 	type episodeEntry struct {
-		ID             int            `json:"id"`
-		Number         int            `json:"number"`
-		AbsoluteNumber *int           `json:"absolute_number,omitempty"`
-		EpisodeType    string         `json:"episode_type"`
-		Title          string         `json:"title"`
-		Overview       string         `json:"overview"`
-		AirDate        string         `json:"air_date"`
-		Status         string         `json:"status"`
-		FilePath       string         `json:"file_path,omitempty"`
+		ID             int    `json:"id"`
+		Number         int    `json:"number"`
+		AbsoluteNumber *int   `json:"absolute_number,omitempty"`
+		EpisodeType    string `json:"episode_type"`
+		Title          string `json:"title"`
+		Overview       string `json:"overview"`
+		AirDate        string `json:"air_date"`
+		Status         string `json:"status"`
+		FilePath       string `json:"file_path,omitempty"`
 	}
 
 	type seasonEntry struct {
@@ -56,9 +58,15 @@ func (s *Server) handleGetEpisodes(w http.ResponseWriter, r *http.Request) {
 		if err := seasonRows.Scan(&se.ID, &se.Number, &nullTitle, &nullOverview, &nullPoster); err != nil {
 			continue
 		}
-		if nullTitle.Valid { se.Title = nullTitle.String }
-		if nullOverview.Valid { se.Overview = nullOverview.String }
-		if nullPoster.Valid { se.PosterURL = nullPoster.String }
+		if nullTitle.Valid {
+			se.Title = nullTitle.String
+		}
+		if nullOverview.Valid {
+			se.Overview = nullOverview.String
+		}
+		if nullPoster.Valid {
+			se.PosterURL = nullPoster.String
+		}
 
 		// Get episodes for this season
 		epRows, err := s.db.Query(`SELECT id, number, absolute_number, episode_type, title, overview, air_date, status, file_path
@@ -79,10 +87,18 @@ func (s *Server) handleGetEpisodes(w http.ResponseWriter, r *http.Request) {
 				v := int(absNum.Int64)
 				ep.AbsoluteNumber = &v
 			}
-			if nullEpTitle.Valid { ep.Title = nullEpTitle.String }
-			if nullOverview.Valid { ep.Overview = nullOverview.String }
-			if nullAirDate.Valid { ep.AirDate = nullAirDate.String }
-			if nullFilePath.Valid { ep.FilePath = nullFilePath.String }
+			if nullEpTitle.Valid {
+				ep.Title = nullEpTitle.String
+			}
+			if nullOverview.Valid {
+				ep.Overview = nullOverview.String
+			}
+			if nullAirDate.Valid {
+				ep.AirDate = nullAirDate.String
+			}
+			if nullFilePath.Valid {
+				ep.FilePath = nullFilePath.String
+			}
 
 			se.Episodes = append(se.Episodes, ep)
 		}
@@ -141,23 +157,31 @@ func (s *Server) handleSearchAll(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	count := 0
+	var ids []int
 	for rows.Next() {
-		var epID int
-		rows.Scan(&epID)
-		// Trigger search in background for each episode
-		go s.searchForEpisodeSilent(mediaID, epID)
-		count++
+		var id int
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
 	}
+	rows.Close()
+	go func() {
+		for _, id := range ids {
+			s.runtimeMu.RLock()
+			s.searchForEpisodeSilent(mediaID, id)
+			s.runtimeMu.RUnlock()
+		}
+	}()
+	count := len(ids)
 
 	writeJSON(w, 200, map[string]interface{}{
-		"status":           "searching",
+		"status":          "searching",
 		"episodes_queued": count,
 	})
 }
 
 func (s *Server) handleDeleteEpisodeFile(w http.ResponseWriter, r *http.Request) {
-	_, err := parseID(r, "id")
+	mediaID, err := parseID(r, "id")
 	if err != nil {
 		writeError(w, 400, "invalid id")
 		return
@@ -167,21 +191,45 @@ func (s *Server) handleDeleteEpisodeFile(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, "invalid episode_id")
 		return
 	}
-
-	var filePath sql.NullString
-	s.db.QueryRow(`SELECT file_path FROM episodes WHERE id = ?`, episodeID).Scan(&filePath)
-
-	if filePath.Valid && filePath.String != "" {
-		os.Remove(filePath.String)
+	var path sql.NullString
+	if err := s.db.QueryRow(`SELECT file_path FROM episodes WHERE id=? AND media_item_id=?`, episodeID, mediaID).Scan(&path); err != nil {
+		writeError(w, 404, "episode not found")
+		return
 	}
-
-	s.db.Exec(`UPDATE episodes SET file_path = NULL, status = 'wanted' WHERE id = ?`, episodeID)
-
+	if path.Valid && path.String != "" {
+		root := s.cfg.Snapshot().MediaRoot
+		resolved, err := filepath.EvalSymlinks(path.String)
+		if err != nil && !os.IsNotExist(err) {
+			writeError(w, 500, "cannot resolve episode file")
+			return
+		}
+		if err == nil {
+			actualRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				writeError(w, 500, "cannot resolve media root")
+				return
+			}
+			rel, err := filepath.Rel(actualRoot, resolved)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+				writeError(w, 400, "episode path is outside media root")
+				return
+			}
+			if err := os.Remove(path.String); err != nil {
+				writeError(w, 500, "could not delete episode file")
+				return
+			}
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE episodes SET file_path=NULL,status='wanted' WHERE id=? AND media_item_id=?`, episodeID, mediaID); err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	s.db.Exec(`UPDATE media_items SET status='wanted' WHERE id=?`, mediaID)
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) handleResetEpisode(w http.ResponseWriter, r *http.Request) {
-	_, err := parseID(r, "id")
+	mediaID, err := parseID(r, "id")
 	if err != nil {
 		writeError(w, 400, "invalid id")
 		return
@@ -191,27 +239,40 @@ func (s *Server) handleResetEpisode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid episode_id")
 		return
 	}
-
-	// Cancel any active SABnzbd downloads for this episode
-	dlRows, _ := s.db.Query(`SELECT id, sabnzbd_nzo_id FROM downloads
-		WHERE episode_id = ? AND status NOT IN ('imported', 'failed')`, episodeID)
-	if dlRows != nil {
-		for dlRows.Next() {
-			var dlID int
-			var nzoID sql.NullString
-			if dlRows.Scan(&dlID, &nzoID) == nil {
-				if nzoID.Valid && nzoID.String != "" {
-					s.grabber.DeleteFromQueue(nzoID.String)
-				}
-				s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ?`, dlID)
-			}
-		}
-		dlRows.Close()
+	var exists int
+	if err := s.db.QueryRow(`SELECT id FROM episodes WHERE id=? AND media_item_id=?`, episodeID, mediaID).Scan(&exists); err != nil {
+		writeError(w, 404, "episode not found")
+		return
 	}
-
-	// Reset episode status to wanted
-	s.db.Exec(`UPDATE episodes SET status = 'wanted' WHERE id = ?`, episodeID)
-
+	rows, err := s.db.Query(`SELECT id,download_type,qbt_hash,sabnzbd_nzo_id FROM downloads WHERE episode_id=? AND status NOT IN ('imported','failed','cancelled')`, episodeID)
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	type download struct {
+		id        int
+		kind      string
+		hash, nzo sql.NullString
+	}
+	var downloads []download
+	for rows.Next() {
+		var d download
+		if err := rows.Scan(&d.id, &d.kind, &d.hash, &d.nzo); err != nil {
+			rows.Close()
+			writeError(w, 500, "database error")
+			return
+		}
+		downloads = append(downloads, d)
+	}
+	rows.Close()
+	for _, d := range downloads {
+		if err := s.cancelClientDownload(d.id, d.kind, d.hash, d.nzo); err != nil {
+			writeError(w, 502, "Cancellation failed: "+err.Error())
+			return
+		}
+		s.db.Exec(`UPDATE downloads SET status='cancelled' WHERE id=?`, d.id)
+	}
+	s.db.Exec(`UPDATE episodes SET status=CASE WHEN file_path IS NOT NULL AND file_path!='' THEN 'available' ELSE 'wanted' END WHERE id=?`, episodeID)
 	writeJSON(w, 200, map[string]string{"status": "reset"})
 }
 
@@ -235,53 +296,12 @@ func (s *Server) searchForEpisode(w http.ResponseWriter, mediaID, episodeID int)
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-
-	if best.DownloadType == "torrent" && best.TopicID > 0 {
-		// Torrent grab
-		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
-		if len(rtIndexers) > 0 {
-			idx := rtIndexers[0]
-			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
-			if err != nil {
-				writeError(w, 502, "torrent download failed: "+err.Error())
-				return
-			}
-
-			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
-				mediaID, episodeID, best.Title, string(qualityJSON), best.Score)
-			dlID, _ := result.LastInsertId()
-			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
-			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
-			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
-				mediaID, episodeID, "Grabbed torrent "+best.Title)
-
-			writeJSON(w, 200, map[string]interface{}{"status": "grabbed", "release": best})
-			return
-		}
-	}
-
-	// NZB grab
-	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
+	nzoID, err := s.enqueueRelease(mediaID, episodeID, 0, *best)
 	if err != nil {
-		writeError(w, 500, "grab failed: "+err.Error())
+		writeError(w, 502, err.Error())
 		return
 	}
-
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
-		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
-		mediaID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
-
-	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
-
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
-		VALUES (?, ?, 'grabbed', ?)`, mediaID, episodeID, "Grabbed "+best.Title)
-
-	writeJSON(w, 200, map[string]interface{}{
-		"status":  "grabbed",
-		"release": best,
-		"nzo_id":  nzoID,
-	})
+	writeJSON(w, 200, map[string]any{"status": "grabbed", "release": best, "nzo_id": nzoID})
 }
 
 func (s *Server) searchForEpisodeSilent(mediaID, episodeID int) {
@@ -299,80 +319,53 @@ func (s *Server) searchForEpisodeSilent(mediaID, episodeID int) {
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-
-	if best.DownloadType == "torrent" && best.TopicID > 0 {
-		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
-		if len(rtIndexers) > 0 {
-			idx := rtIndexers[0]
-			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
-			if err != nil {
-				slog.Warn("silent torrent grab failed", "error", err)
-				return
-			}
-			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, ?, 'torrent')`,
-				mediaID, episodeID, best.Title, string(qualityJSON), best.Score)
-			dlID, _ := result.LastInsertId()
-			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
-			s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
-			s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details) VALUES (?, ?, 'grabbed', ?)`,
-				mediaID, episodeID, "Grabbed torrent "+best.Title)
-			return
-		}
-	}
-
-	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
+	nzoID, err := s.enqueueRelease(mediaID, episodeID, 0, *best)
+	_ = nzoID
 	if err != nil {
-		return
+		slog.Warn("episode grab failed", "error", err)
 	}
-
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
-		VALUES (?, ?, ?, ?, ?, ?, 'nzb')`,
-		mediaID, episodeID, best.Title, nzoID, string(qualityJSON), best.Score)
-	s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, episodeID)
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
-		VALUES (?, ?, 'grabbed', ?)`, mediaID, episodeID, "Grabbed "+best.Title)
 }
 
 func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 	var title, imdbID string
 	var year int
 	var profileID int
-	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
-		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &imdbID, &year, &profileID)
+	var anime bool
+	s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0), anime
+		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &imdbID, &year, &profileID, &anime)
 
 	allIndexers := s.loadIndexers()
 
 	// Newznab search
-	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+	newznabIdxs := indexer.MovieIndexers(allIndexers, "newznab", anime)
 	releases := s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
 	for i := range releases {
 		releases[i].DownloadType = "nzb"
 	}
 
 	// Rutracker search
-	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+	rtIndexers := indexer.MovieIndexers(allIndexers, "rutracker", anime)
 	if len(rtIndexers) > 0 {
 		query := title
 		if year > 0 {
 			query = fmt.Sprintf("%s %d", title, year)
 		}
-		rtReleases := s.searchRutracker(rtIndexers, query, "movie")
+		rtContentType := "movie"
+		if anime {
+			rtContentType = "anime"
+		}
+		rtReleases := indexer.FilterMovieReleases(s.searchRutracker(rtIndexers, query, rtContentType), title, year)
 		releases = append(releases, rtReleases...)
 	}
 
-	var profile indexer.QualityProfile
-	s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-		FROM quality_profiles WHERE id = ?`, profileID).Scan(
-		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+	profile := s.loadProfile(profileID)
 
 	// Filter blacklisted releases
 	movieBlacklist := s.loadBlacklist(mediaID, 0)
 	releases = indexer.FilterBlacklisted(releases, movieBlacklist)
 
 	for i := range releases {
-		indexer.ScoreRelease(&releases[i], &profile)
+		indexer.ScoreRelease(&releases[i], profile)
 	}
 
 	best := indexer.BestRelease(releases)
@@ -384,60 +377,32 @@ func (s *Server) searchForMovie(w http.ResponseWriter, mediaID int) {
 		return
 	}
 
-	qualityJSON, _ := json.Marshal(best.Quality)
-
-	if best.DownloadType == "torrent" && best.TopicID > 0 {
-		rtIdxs := filterIndexersByType(allIndexers, "rutracker", "")
-		if len(rtIdxs) > 0 {
-			idx := rtIdxs[0]
-			torrentData, err := s.rutracker.DownloadTorrent(best.TopicID, idx.Username, idx.Password)
-			if err != nil {
-				writeError(w, 502, "torrent download failed: "+err.Error())
-				return
-			}
-			result, _ := s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, quality, score, download_type) VALUES (?, ?, ?, ?, 'torrent')`,
-				mediaID, best.Title, string(qualityJSON), best.Score)
-			dlID, _ := result.LastInsertId()
-			s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
-			s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaID)
-			s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details) VALUES (?, 'grabbed', ?)`,
-				mediaID, fmt.Sprintf("Grabbed torrent %s", best.Title))
-
-			writeJSON(w, 200, map[string]interface{}{"status": "grabbed", "release": best})
-			return
-		}
-	}
-
-	nzoID, err := s.grabber.GrabNZB(best.NZBURL, best.Title)
+	nzoID, err := s.enqueueRelease(mediaID, 0, 0, *best)
 	if err != nil {
-		writeError(w, 500, "grab failed: "+err.Error())
+		writeError(w, 502, err.Error())
 		return
 	}
-
-	s.db.Exec(`INSERT INTO downloads (media_item_id, nzb_title, sabnzbd_nzo_id, quality, score, download_type)
-		VALUES (?, ?, ?, ?, ?, 'nzb')`, mediaID, best.Title, nzoID, string(qualityJSON), best.Score)
-	s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, mediaID)
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, action, details)
-		VALUES (?, 'grabbed', ?)`, mediaID, fmt.Sprintf("Grabbed %s", best.Title))
-
-	writeJSON(w, 200, map[string]interface{}{
-		"status":  "grabbed",
-		"release": best,
-	})
+	writeJSON(w, 200, map[string]any{"status": "grabbed", "release": best, "nzo_id": nzoID})
 }
 
 func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Release, error) {
 	var title string
 	var tvdbID, profileID int
 	var anime bool
-	s.db.QueryRow(`SELECT title, COALESCE(tvdb_id,0), anime, COALESCE(quality_profile_id,0)
-		FROM media_items WHERE id = ?`, mediaID).Scan(&title, &tvdbID, &anime, &profileID)
+	err := s.db.QueryRow(`SELECT title, COALESCE(tvdb_id,0), anime, COALESCE(quality_profile_id,0)
+		FROM media_items WHERE id = ? AND type = 'series'`, mediaID).Scan(&title, &tvdbID, &anime, &profileID)
+	if err != nil {
+		return nil, fmt.Errorf("media item not found")
+	}
 
 	var seasonNum, epNum int
 	var absNum sql.NullInt64
-	s.db.QueryRow(`SELECT s.number, e.number, e.absolute_number
-		FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE e.id = ?`,
-		episodeID).Scan(&seasonNum, &epNum, &absNum)
+	err = s.db.QueryRow(`SELECT s.number, e.number, e.absolute_number
+		FROM episodes e JOIN seasons s ON e.season_id = s.id WHERE e.id = ? AND e.media_item_id = ?`,
+		episodeID, mediaID).Scan(&seasonNum, &epNum, &absNum)
+	if err != nil {
+		return nil, fmt.Errorf("episode does not belong to this series")
+	}
 
 	allIndexers := s.loadIndexers()
 
@@ -451,7 +416,7 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	var releases []indexer.Release
 	if anime && absNum.Valid {
 		titles := []string{title}
-		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64))
+		releases = s.newznab.SearchAnimeEpisode(newznabIdxs, titles, int(absNum.Int64), seasonNum, epNum)
 	} else {
 		releases = s.newznab.SearchEpisode(newznabIdxs, tvdbID, seasonNum, epNum, title)
 	}
@@ -463,22 +428,24 @@ func (s *Server) findReleasesForEpisode(mediaID, episodeID int) ([]indexer.Relea
 	// Rutracker search
 	rtIndexers := filterIndexersByType(allIndexers, "rutracker", contentType)
 	if len(rtIndexers) > 0 {
-		query := fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)
+		queries := []string{fmt.Sprintf("%s S%02dE%02d", title, seasonNum, epNum)}
+		absolute := 0
 		if anime && absNum.Valid {
-			query = fmt.Sprintf("%s %d", title, absNum.Int64)
+			absolute = int(absNum.Int64)
+			queries = append(queries, fmt.Sprintf("%s %d", title, absolute))
 		}
-		rtReleases := s.searchRutracker(rtIndexers, query, contentType)
-		releases = append(releases, rtReleases...)
+		var torrents []indexer.Release
+		for _, query := range queries {
+			torrents = append(torrents, s.searchRutracker(rtIndexers, query, contentType)...)
+		}
+		torrents = indexer.FilterEpisodeReleases(indexer.DeduplicateReleases(torrents), title, seasonNum, epNum, absolute)
+		releases = append(releases, torrents...)
 	}
 
-	var profile indexer.QualityProfile
-	s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-		FROM quality_profiles WHERE id = ?`, profileID).Scan(
-		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+	profile := s.loadProfile(profileID)
 
 	for i := range releases {
-		indexer.ScoreRelease(&releases[i], &profile)
+		indexer.ScoreRelease(&releases[i], profile)
 	}
 
 	return releases, nil

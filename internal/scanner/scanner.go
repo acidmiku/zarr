@@ -1,12 +1,14 @@
 package scanner
 
 import (
+	"database/sql"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"mediaforge/internal/database"
 	"mediaforge/internal/postprocess"
@@ -14,6 +16,7 @@ import (
 
 // Scanner discovers existing media files on disk and matches them to library items.
 type Scanner struct {
+	mu        sync.Mutex
 	db        *database.DB
 	mediaRoot string
 }
@@ -24,6 +27,8 @@ func New(db *database.DB, mediaRoot string) *Scanner {
 
 // UpdateMediaRoot updates the media root directory.
 func (s *Scanner) UpdateMediaRoot(root string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.mediaRoot = root
 }
 
@@ -36,6 +41,8 @@ type ScanResult struct {
 
 // Scan walks the media root and matches files to library items.
 func (s *Scanner) Scan() (*ScanResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	slog.Info("starting library scan", "root", s.mediaRoot)
 
 	result := &ScanResult{}
@@ -48,7 +55,7 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return nil
+				return err
 			}
 			if info.IsDir() {
 				return nil
@@ -76,10 +83,11 @@ func (s *Scanner) Scan() (*ScanResult, error) {
 			return nil
 		})
 		if err != nil {
-			slog.Warn("scan error", "dir", dir, "error", err)
+			return nil, err
 		}
 	}
 
+	result.FilesNew = result.FilesFound - result.FilesMatched
 	slog.Info("library scan complete", "found", result.FilesFound, "matched", result.FilesMatched)
 	return result, nil
 }
@@ -107,23 +115,26 @@ func (s *Scanner) matchMovieFile(path string) bool {
 	year, _ := strconv.Atoi(match[2])
 
 	// Try to match against library
-	var id int
-	err = s.db.QueryRow(`SELECT id FROM media_items WHERE type = 'movie' AND title LIKE ? AND year = ?`,
-		"%"+title+"%", year).Scan(&id)
+	id, err := s.findMedia(title, "movie", false, year)
 	if err != nil {
 		return false
 	}
 
-	// Update the media item
-	s.db.Exec(`UPDATE media_items SET root_path = ?, status = 'available', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+	// A scan matches names, not an imported file identity. Even the same path
+	// may now contain an externally replaced file. Never retain an old release
+	// title or use NULL (which revives download history as an upgrade baseline).
+	_, err = s.db.Exec(`UPDATE media_items SET root_path = ?, status = 'available', current_release_title = 'manual-grab', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		filepath.Dir(path), id)
+	if err != nil {
+		return false
+	}
 
 	slog.Info("matched movie file", "title", title, "year", year, "path", path)
 	return true
 }
 
 // TV pattern: tv/Title (Year)/Season XX/Title - SxxExx - Episode Title.ext
-var tvEpisodePattern = regexp.MustCompile(`(?i)S(\d{2})E(\d{2})`)
+var tvEpisodePattern = regexp.MustCompile(`(?i)S(\d{1,3})E(\d{1,4})(?:[^0-9]|$)`)
 
 func (s *Scanner) matchTVFile(path string) bool {
 	rel, err := filepath.Rel(filepath.Join(s.mediaRoot, "tv"), path)
@@ -152,7 +163,8 @@ func (s *Scanner) matchTVFile(path string) bool {
 	season, _ := strconv.Atoi(epMatch[1])
 	episode, _ := strconv.Atoi(epMatch[2])
 
-	return s.matchEpisode(title, false, season, episode, path)
+	year, _ := strconv.Atoi(match[2])
+	return s.matchEpisode(title, false, year, season, episode, path)
 }
 
 // Anime pattern: anime/Title/Season XX/Title - SxxExx - xxx - Episode Title.ext
@@ -177,13 +189,11 @@ func (s *Scanner) matchAnimeFile(path string) bool {
 	season, _ := strconv.Atoi(epMatch[1])
 	episode, _ := strconv.Atoi(epMatch[2])
 
-	return s.matchEpisode(title, true, season, episode, path)
+	return s.matchEpisode(title, true, 0, season, episode, path)
 }
 
-func (s *Scanner) matchEpisode(title string, anime bool, season, episode int, path string) bool {
-	var mediaID int
-	err := s.db.QueryRow(`SELECT id FROM media_items WHERE title LIKE ? AND anime = ?`,
-		"%"+title+"%", anime).Scan(&mediaID)
+func (s *Scanner) matchEpisode(title string, anime bool, year, season, episode int, path string) bool {
+	mediaID, err := s.findMedia(title, "series", anime, year)
 	if err != nil {
 		return false
 	}
@@ -197,8 +207,45 @@ func (s *Scanner) matchEpisode(title string, anime bool, season, episode int, pa
 		return false
 	}
 
-	s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available' WHERE id = ?`, path, epID)
+	// No persisted inode/content identity proves this is the previously
+	// imported file, even when file_path is unchanged; invalidate provenance.
+	if _, err := s.db.Exec(`UPDATE episodes SET file_path = ?, status = 'available', current_release_title = 'manual-grab' WHERE id = ?`, path, epID); err != nil {
+		return false
+	}
 
 	slog.Info("matched episode file", "title", title, "season", season, "episode", episode, "path", path)
 	return true
+}
+
+// Match the sanitized on-disk title exactly. LIKE allowed a folder such as
+// "Alien" to mark "Aliens" or a wildcard-containing title as available.
+func (s *Scanner) findMedia(title, kind string, anime bool, year int) (int, error) {
+	rows, err := s.db.Query(`SELECT id,title,year FROM media_items WHERE type=? AND (type='movie' OR anime=?)`, kind, anime)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	found := 0
+	for rows.Next() {
+		var id int
+		var candidate string
+		var candidateYear sql.NullInt64
+		if err := rows.Scan(&id, &candidate, &candidateYear); err != nil {
+			return 0, err
+		}
+		if !strings.EqualFold(postprocess.SanitizeFilename(candidate), title) || (year > 0 && candidateYear.Int64 != int64(year)) {
+			continue
+		}
+		if found != 0 {
+			return 0, sql.ErrNoRows
+		}
+		found = id
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if found == 0 {
+		return 0, sql.ErrNoRows
+	}
+	return found, nil
 }

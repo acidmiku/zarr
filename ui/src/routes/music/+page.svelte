@@ -10,11 +10,19 @@
 	let searchQuery = '';
 	let mounted = false;
 	let searchRequest = 0;
+	let libraryRequest = 0;
+	let artistRequest = 0;
+	let libraryArtist = '';
+	let libraryError = '';
 	$: if (mounted) applyLocation($page.url.search);
 	function applyLocation(search) {
 		const params = new URLSearchParams(search);
 		activeTab = params.get('tab') === 'library' ? 'library' : 'discover';
-		searchType = ['album','artist','track'].includes(params.get('type')) ? params.get('type') : 'album';
+		libraryArtist = params.get('artist') || '';
+		if (libraryArtist) libraryView = 'albums';
+		searchType = ['album', 'artist', 'track'].includes(params.get('type'))
+			? params.get('type')
+			: 'album';
 		searchQuery = params.get('q') || '';
 		handleSearch({ detail: searchQuery });
 	}
@@ -38,7 +46,11 @@
 
 	onMount(async () => {
 		mounted = true;
-		try { profiles = await api.getProfiles(); } catch (err) { notify(err.message, 'error'); }
+		try {
+			profiles = await api.getProfiles();
+		} catch (err) {
+			notify(err.message, 'error');
+		}
 		loadTrending();
 		loadLibrary();
 	});
@@ -53,24 +65,30 @@
 	}
 
 	async function loadLibrary() {
+		const request = ++libraryRequest;
 		loadingLibrary = true;
+		libraryError = '';
 		try {
-			libraryAlbums = await api.getMusicLibrary(libraryFilter);
-			if (!Array.isArray(libraryAlbums)) libraryAlbums = [];
-		} catch {
-			libraryAlbums = [];
+			const [albums, artists] = await Promise.all([
+				api.getMusicLibrary(libraryFilter),
+				api.getMusicArtists()
+			]);
+			if (request !== libraryRequest) return;
+			libraryAlbums = Array.isArray(albums) ? albums : [];
+			libraryArtists = Array.isArray(artists) ? artists : [];
+		} catch (e) {
+			if (request === libraryRequest) libraryError = e.message;
+		} finally {
+			if (request === libraryRequest) loadingLibrary = false;
 		}
-		try {
-			libraryArtists = await api.getMusicArtists();
-			if (!Array.isArray(libraryArtists)) libraryArtists = [];
-		} catch {
-			libraryArtists = [];
-		}
-		loadingLibrary = false;
 	}
+	$: visibleLibraryAlbums = libraryAlbums.filter(
+		(album) => !libraryArtist || album.artist_mbid === libraryArtist
+	);
 
 	async function handleSearch(e) {
 		const request = ++searchRequest;
+		artistRequest++;
 		const query = e.detail;
 		if (!query) {
 			loading = false;
@@ -96,11 +114,13 @@
 	}
 
 	async function viewArtistAlbums(artist) {
+		const request = ++artistRequest;
 		loadingArtistAlbums = true;
 		selectedArtistName = artist.name;
 		try {
 			const data = await api.musicArtist(artist.id);
-			artistAlbums = (data.albums || []).map(rg => ({
+			if (request !== artistRequest) return;
+			artistAlbums = (data.albums || []).map((rg) => ({
 				id: rg.id,
 				title: rg.title,
 				artist: artist.name,
@@ -110,6 +130,7 @@
 				cover_url: `https://coverartarchive.org/release-group/${rg.id}/front-250`
 			}));
 		} catch (err) {
+			if (request !== artistRequest) return;
 			notify(err?.message || 'Failed to load artist albums', 'error');
 			artistAlbums = [];
 		}
@@ -132,6 +153,10 @@
 	}
 
 	function clearSearch() {
+		searchRequest++;
+		artistRequest++;
+		loading = false;
+		loadingArtistAlbums = false;
 		searchQuery = '';
 		results = [];
 		artistAlbums = [];
@@ -146,6 +171,12 @@
 	};
 </script>
 
+<svelte:window
+	on:keydown={(event) => {
+		if (event.key === 'Escape') selectedItem = null;
+	}}
+/>
+
 <svelte:head>
 	<title>Music - Zarr</title>
 </svelte:head>
@@ -155,8 +186,12 @@
 	<header class="page-header">
 		<h1>Music</h1>
 		<div class="tab-selector">
-			<button class:active={activeTab === 'discover'} on:click={() => activeTab = 'discover'}>Discover</button>
-			<button class:active={activeTab === 'library'} on:click={() => activeTab = 'library'}>Library</button>
+			<button class:active={activeTab === 'discover'} on:click={() => (activeTab = 'discover')}
+				>Discover</button
+			>
+			<button class:active={activeTab === 'library'} on:click={() => (activeTab = 'library')}
+				>Library</button
+			>
 		</div>
 	</header>
 
@@ -164,13 +199,23 @@
 		<div class="search-row">
 			<div class="search-type-selector">
 				{#each [['album', 'Album'], ['artist', 'Artist'], ['track', 'Track']] as [value, label]}
-					<button class:active={searchType === value} on:click={() => { searchType = value; clearSearch(); }}>
+					<button
+						class:active={searchType === value}
+						on:click={() => {
+							searchType = value;
+							clearSearch();
+						}}
+					>
 						{label}
 					</button>
 				{/each}
 			</div>
 			<div class="search-bar-wrap">
-				<SearchBar bind:value={searchQuery} on:search={handleSearch} placeholder={placeholders[searchType]} />
+				<SearchBar
+					bind:value={searchQuery}
+					on:search={handleSearch}
+					placeholder={placeholders[searchType]}
+				/>
 			</div>
 		</div>
 
@@ -182,7 +227,13 @@
 		{#if searchQuery && searchType === 'artist' && !loading}
 			{#if selectedArtistName}
 				<div class="breadcrumb">
-					<button class="link-btn" on:click={() => { artistAlbums = []; selectedArtistName = ''; }}>
+					<button
+						class="link-btn"
+						on:click={() => {
+							artistAlbums = [];
+							selectedArtistName = '';
+						}}
+					>
 						← Back to artists
 					</button>
 					<h2 class="section-title">{selectedArtistName} — Albums</h2>
@@ -193,18 +244,36 @@
 					<div class="grid music-grid stagger-grid">
 						{#each artistAlbums as item}
 							<!-- svelte-ignore a11y-click-events-have-key-events -->
-							<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
+							<div
+								class="album-card"
+								on:click={() => showDetail(item)}
+								on:keydown={(event) => {
+									if (event.key === 'Enter' || event.key === ' ') {
+										event.preventDefault();
+										showDetail(item);
+									}
+								}}
+								role="button"
+								tabindex="0"
+								aria-label={`View ${item.title || item.name}`}
+							>
 								<div class="album-cover">
 									{#if item.cover_url}
-										<img src={api.imageUrl(item.cover_url)} alt={item.title} loading="lazy"
-											on:error={(e) => e.target.style.display = 'none'} />
+										<img
+											src={api.imageUrl(item.cover_url)}
+											alt={item.title}
+											loading="lazy"
+											on:error={(e) => (e.target.style.display = 'none')}
+										/>
 									{/if}
 									<div class="cover-fallback">{(item.title || '?')[0]}</div>
 								</div>
 								<div class="album-info">
 									<div class="album-title">{item.title}</div>
 									{#if item.year}
-										<div class="album-year">{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}</div>
+										<div class="album-year">
+											{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}
+										</div>
 									{/if}
 									{#if item.type}<div class="album-type">{item.type}</div>{/if}
 								</div>
@@ -220,7 +289,18 @@
 				<div class="artist-list">
 					{#each results as artist}
 						<!-- svelte-ignore a11y-click-events-have-key-events -->
-						<div class="artist-row" on:click={() => viewArtistAlbums(artist)} role="button" tabindex="0">
+						<div
+							class="artist-row"
+							on:click={() => viewArtistAlbums(artist)}
+							on:keydown={(event) => {
+								if (event.key === 'Enter' || event.key === ' ') {
+									event.preventDefault();
+									viewArtistAlbums(artist);
+								}
+							}}
+							role="button"
+							tabindex="0"
+						>
 							<div class="artist-initial">{(artist.name || '?')[0]}</div>
 							<div class="artist-info">
 								<div class="artist-name">{artist.name}</div>
@@ -235,7 +315,7 @@
 				</div>
 			{/if}
 
-		<!-- Album / Track search results -->
+			<!-- Album / Track search results -->
 		{:else if searchQuery && !loading}
 			{#if results.length > 0}
 				<h2 class="section-title">{results.length} results</h2>
@@ -243,11 +323,27 @@
 			<div class="grid music-grid stagger-grid">
 				{#each displayItems as item}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
-					<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
+					<div
+						class="album-card"
+						on:click={() => showDetail(item)}
+						on:keydown={(event) => {
+							if (event.key === 'Enter' || event.key === ' ') {
+								event.preventDefault();
+								showDetail(item);
+							}
+						}}
+						role="button"
+						tabindex="0"
+						aria-label={`View ${item.title || item.name}`}
+					>
 						<div class="album-cover">
 							{#if item.cover_url || item.image_url}
-								<img src={api.imageUrl(item.cover_url || item.image_url)} alt={item.title || item.name} loading="lazy"
-									on:error={(e) => e.target.style.display = 'none'} />
+								<img
+									src={api.imageUrl(item.cover_url || item.image_url)}
+									alt={item.title || item.name}
+									loading="lazy"
+									on:error={(e) => (e.target.style.display = 'none')}
+								/>
 							{/if}
 							<div class="cover-fallback">{(item.title || item.name || '?')[0]}</div>
 							{#if item.in_library}
@@ -261,7 +357,9 @@
 								<div class="album-track">♫ {item.track_name}</div>
 							{/if}
 							{#if item.year}
-								<div class="album-year">{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}</div>
+								<div class="album-year">
+									{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}
+								</div>
 							{/if}
 						</div>
 					</div>
@@ -271,17 +369,33 @@
 				<div class="empty">No results found for "{searchQuery}"</div>
 			{/if}
 
-		<!-- Trending (no search query) -->
+			<!-- Trending (no search query) -->
 		{:else if !searchQuery && !loading}
 			<h2 class="section-title">Trending Albums</h2>
 			<div class="grid music-grid stagger-grid">
 				{#each trending as item}
 					<!-- svelte-ignore a11y-click-events-have-key-events -->
-					<div class="album-card" on:click={() => showDetail(item)} role="button" tabindex="0">
+					<div
+						class="album-card"
+						on:click={() => showDetail(item)}
+						on:keydown={(event) => {
+							if (event.key === 'Enter' || event.key === ' ') {
+								event.preventDefault();
+								showDetail(item);
+							}
+						}}
+						role="button"
+						tabindex="0"
+						aria-label={`View ${item.title || item.name}`}
+					>
 						<div class="album-cover">
 							{#if item.cover_url || item.image_url}
-								<img src={api.imageUrl(item.cover_url || item.image_url)} alt={item.title || item.name} loading="lazy"
-									on:error={(e) => e.target.style.display = 'none'} />
+								<img
+									src={api.imageUrl(item.cover_url || item.image_url)}
+									alt={item.title || item.name}
+									loading="lazy"
+									on:error={(e) => (e.target.style.display = 'none')}
+								/>
 							{/if}
 							<div class="cover-fallback">{(item.title || item.name || '?')[0]}</div>
 						</div>
@@ -293,18 +407,25 @@
 				{/each}
 			</div>
 		{/if}
-
 	{:else}
 		<!-- Library tab -->
 		<div class="library-controls">
 			<div class="view-toggle">
-				<button class:active={libraryView === 'albums'} on:click={() => libraryView = 'albums'}>Albums</button>
-				<button class:active={libraryView === 'artists'} on:click={() => libraryView = 'artists'}>Artists</button>
+				<button class:active={libraryView === 'albums'} on:click={() => (libraryView = 'albums')}
+					>Albums</button
+				>
+				<button class:active={libraryView === 'artists'} on:click={() => (libraryView = 'artists')}
+					>Artists</button
+				>
 			</div>
 			{#if libraryView === 'albums'}
 				<div class="filter-bar">
 					{#each ['all', 'wanted', 'available', 'downloading'] as f}
-						<button class="filter-btn" class:active={libraryFilter === f} on:click={() => setFilter(f)}>
+						<button
+							class="filter-btn"
+							class:active={libraryFilter === f}
+							on:click={() => setFilter(f)}
+						>
 							{f[0].toUpperCase() + f.slice(1)}
 						</button>
 					{/each}
@@ -314,20 +435,42 @@
 
 		{#if loadingLibrary}
 			<div class="loading">Loading library...</div>
+		{:else if libraryError}
+			<div class="empty" role="alert">
+				Music library unavailable: {libraryError}
+				<button class="link-btn" on:click={loadLibrary}>Try again</button>
+			</div>
 		{:else if libraryView === 'albums'}
-			{#if libraryAlbums.length === 0}
-				<div class="empty">No albums in library{libraryFilter !== 'all' ? ` with status "${libraryFilter}"` : ''}</div>
+			{#if libraryArtist}<div class="breadcrumb">
+					<a class="link-btn" href="/music?tab=library">← All artists</a><span
+						>{libraryArtists.find((artist) => artist.mbid === libraryArtist)?.name ||
+							'Artist albums'}</span
+					>
+				</div>{/if}
+			{#if visibleLibraryAlbums.length === 0}
+				<div class="empty">
+					No albums in library{libraryFilter !== 'all' ? ` with status "${libraryFilter}"` : ''}
+				</div>
 			{:else}
 				<div class="grid music-grid stagger-grid">
-					{#each libraryAlbums as album}
+					{#each visibleLibraryAlbums as album}
 						<a href="/music/{album.id}" class="album-card">
 							<div class="album-cover">
 								{#if album.release_group_id}
-									<img src={api.musicCoverUrl(album.release_group_id)} alt={album.title} loading="lazy"
-										on:error={(e) => e.target.style.display = 'none'} />
+									<img
+										src={api.musicCoverUrl(album.release_group_id)}
+										alt={album.title}
+										loading="lazy"
+										on:error={(e) => (e.target.style.display = 'none')}
+									/>
 								{/if}
 								{#if album.image_url}
-									<img src={api.imageUrl(album.image_url)} alt={album.title} loading="lazy" class="fallback-img" />
+									<img
+										src={api.imageUrl(album.image_url)}
+										alt={album.title}
+										loading="lazy"
+										class="fallback-img"
+									/>
 								{/if}
 								<div class="cover-fallback">{(album.title || '?')[0]}</div>
 								<span class="status-badge status-{album.status}">{album.status}</span>
@@ -350,8 +493,9 @@
 			{:else}
 				<div class="artist-list">
 					{#each libraryArtists as artist}
-						<a href="/music?artist={artist.id}" class="artist-row"
-							on:click|preventDefault={() => { libraryFilter = 'all'; libraryView = 'albums'; libraryAlbums = libraryAlbums; }}
+						<a
+							href="/music?tab=library&artist={encodeURIComponent(artist.mbid)}"
+							class="artist-row"
 						>
 							<div class="artist-initial">{(artist.name || '?')[0]}</div>
 							<div class="artist-info">
@@ -372,9 +516,9 @@
 
 {#if selectedItem}
 	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<div class="modal-overlay" on:click={() => selectedItem = null} role="presentation">
+	<div class="modal-overlay" on:click={() => (selectedItem = null)} role="presentation">
 		<div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-			<button class="modal-close" on:click={() => selectedItem = null}>✕</button>
+			<button class="modal-close" on:click={() => (selectedItem = null)}>✕</button>
 			<MusicDetail
 				item={selectedItem}
 				{profiles}
@@ -402,7 +546,8 @@
 	}
 
 	/* Tab selector & view toggle — glass panels */
-	.tab-selector, .view-toggle {
+	.tab-selector,
+	.view-toggle {
 		display: flex;
 		gap: 0.25rem;
 		background: var(--glass-bg);
@@ -413,7 +558,8 @@
 		-webkit-backdrop-filter: blur(12px);
 	}
 
-	.tab-selector button, .view-toggle button {
+	.tab-selector button,
+	.view-toggle button {
 		padding: 0.4rem 1rem;
 		border: none;
 		background: transparent;
@@ -425,7 +571,8 @@
 		transition: all 0.2s ease;
 	}
 
-	.tab-selector button.active, .view-toggle button.active {
+	.tab-selector button.active,
+	.view-toggle button.active {
 		background: var(--accent);
 		color: var(--text-inverse);
 		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
@@ -469,7 +616,9 @@
 		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
 	}
 
-	.search-bar-wrap { flex: 1; }
+	.search-bar-wrap {
+		flex: 1;
+	}
 
 	/* Section title — editorial style */
 	.section-title {
@@ -501,7 +650,10 @@
 		transition: opacity 0.2s ease;
 	}
 
-	.link-btn:hover { text-decoration: underline; opacity: 0.8; }
+	.link-btn:hover {
+		text-decoration: underline;
+		opacity: 0.8;
+	}
 
 	/* Music grid */
 	.music-grid {
@@ -516,7 +668,9 @@
 		border: 1px solid var(--glass-border);
 		border-radius: var(--radius-md);
 		cursor: pointer;
-		transition: transform 0.25s ease, box-shadow 0.25s ease;
+		transition:
+			transform 0.25s ease,
+			box-shadow 0.25s ease;
 		text-decoration: none;
 		color: inherit;
 		overflow: hidden;
@@ -582,9 +736,18 @@
 		text-transform: uppercase;
 	}
 
-	.status-wanted { background: var(--gold); color: #000; }
-	.status-available { background: var(--success); color: #fff; }
-	.status-downloading { background: var(--accent); color: var(--text-inverse); }
+	.status-wanted {
+		background: var(--gold);
+		color: #000;
+	}
+	.status-available {
+		background: var(--success);
+		color: #fff;
+	}
+	.status-downloading {
+		background: var(--accent);
+		color: var(--text-inverse);
+	}
 
 	.album-info {
 		padding: 0.5rem 0.6rem;
@@ -643,7 +806,10 @@
 		cursor: pointer;
 		text-decoration: none;
 		color: inherit;
-		transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+		transition:
+			transform 0.2s ease,
+			box-shadow 0.2s ease,
+			background 0.2s ease;
 	}
 
 	.artist-row:hover {
@@ -666,11 +832,28 @@
 		flex-shrink: 0;
 	}
 
-	.artist-info { flex: 1; min-width: 0; }
-	.artist-name { font-weight: 600; font-size: 0.9rem; }
-	.artist-meta { display: flex; gap: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
-	.arrow { color: var(--text-muted); font-size: 1.2rem; transition: transform 0.2s ease; }
-	.artist-row:hover .arrow { transform: translateX(2px); }
+	.artist-info {
+		flex: 1;
+		min-width: 0;
+	}
+	.artist-name {
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+	.artist-meta {
+		display: flex;
+		gap: 0.75rem;
+		font-size: 0.75rem;
+		color: var(--text-muted);
+	}
+	.arrow {
+		color: var(--text-muted);
+		font-size: 1.2rem;
+		transition: transform 0.2s ease;
+	}
+	.artist-row:hover .arrow {
+		transform: translateX(2px);
+	}
 
 	/* Library controls */
 	.library-controls {

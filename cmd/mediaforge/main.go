@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"mediaforge/internal/bootstrap"
 	"mediaforge/internal/config"
 	"mediaforge/internal/database"
 	"mediaforge/internal/grabber"
@@ -41,12 +42,19 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 
-	slog.Info("Zarr starting", "version", "0.1.0")
+	slog.Info("Zarr starting", "version", "0.3.0")
 
 	// Open database
 	configDir := os.Getenv("MEDIAFORGE_CONFIG_DIR")
 	if configDir == "" {
 		configDir = "/config"
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--init-connections" {
+		if err := bootstrap.Init(configDir, "/sabnzbd-config", "/qbittorrent-config"); err != nil {
+			slog.Error("initialize bundled connections failed", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	db, err := database.Open(configDir)
@@ -55,6 +63,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	if err := bootstrap.Seed(db, configDir); err != nil {
+		slog.Error("load bundled connections failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Load configuration
 	cfg := config.Load(db)
@@ -80,11 +92,6 @@ func main() {
 
 	// Initialize anime ID mapping
 	mapping := metadata.NewMapping(clients.Proxy)
-	go func() {
-		if err := mapping.Refresh(); err != nil {
-			slog.Warn("initial anime mapping refresh failed", "error", err)
-		}
-	}()
 
 	// Initialize music clients
 	musicbrainzClient := metadata.NewMusicBrainzClient(clients.Proxy)
@@ -152,10 +159,13 @@ func main() {
 
 	// Initialize HTTP server
 	srv := server.New(db, cfg, grabberSvc, newznabClient, tmdbClient, anilistClient, mapping, processor, scannerSvc, clients.Proxy, clients.Direct, musicbrainzClient, coverartClient, lastfmClient, qbtClient, rutrackerClient)
+	srv.SetMetadataUpdater(sched.SetMetadataClient)
 
 	httpServer := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: srv.Handler(),
+		Addr:              ":" + cfg.Port,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown

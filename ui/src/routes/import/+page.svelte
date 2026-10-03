@@ -1,4 +1,5 @@
 <script>
+	import { onMount } from 'svelte';
 	import { api } from '$lib/api';
 	import { notify } from '$lib/stores/app';
 
@@ -17,16 +18,19 @@
 	async function loadProfiles() {
 		try {
 			profiles = await api.getProfiles();
-			if (profiles.length > 0) {
-				selectedProfileId = profiles[0].id;
-			}
 		} catch {
 			profiles = [];
 		}
 	}
-	loadProfiles();
+	onMount(loadProfiles);
+	$: matchingProfiles = profiles.filter((p) =>
+		mediaType === 'music' ? p.profile_type === 'music' : p.profile_type !== 'music'
+	);
+	$: if (selectedProfileId && !matchingProfiles.some((p) => p.id === selectedProfileId))
+		selectedProfileId = 0;
 
 	async function scan() {
+		if (scanning) return;
 		if (!importPath.trim()) {
 			notify('Please enter a directory path', 'error');
 			return;
@@ -47,6 +51,7 @@
 					}
 				});
 				selectedItems = selectedItems; // trigger reactivity
+				selectAll = selectedItems.size > 0;
 			}
 		} catch (err) {
 			notify(err?.message || 'Scan failed', 'error');
@@ -77,9 +82,10 @@
 		selectedItems = selectedItems;
 	}
 
-	$: importableCount = scanResults.filter(r => r.match && !r.in_library).length;
+	$: importableCount = scanResults.filter((r) => r.match && !r.in_library).length;
 
 	async function executeImport() {
+		if (importing || scanning) return;
 		if (selectedItems.size === 0) {
 			notify('No items selected for import', 'error');
 			return;
@@ -87,7 +93,7 @@
 
 		importing = true;
 		const items = [];
-		selectedItems.forEach(i => {
+		selectedItems.forEach((i) => {
 			const r = scanResults[i];
 			if (!r.match) return;
 
@@ -115,7 +121,7 @@
 			const results = await api.importExecute(items);
 			let imported = 0;
 			let errors = 0;
-			results.forEach(r => {
+			results.forEach((r) => {
 				if (r.status === 'imported') imported++;
 				else if (r.status === 'error') errors++;
 			});
@@ -194,19 +200,25 @@
 					id="import-path"
 					type="text"
 					bind:value={importPath}
+					disabled={scanning || importing}
 					placeholder="/path/to/media/files"
-					on:keydown={e => e.key === 'Enter' && scan()}
+					on:keydown={(e) => e.key === 'Enter' && scan()}
 				/>
 			</div>
 
 			<div class="type-selector">
-				<label>Media type</label>
+				<span class="connection-hint">Media type</span>
 				<div class="type-buttons">
 					{#each Object.entries(typeLabels) as [value, label]}
 						<button
 							class="type-btn"
 							class:active={mediaType === value}
-							on:click={() => { mediaType = value; scanResults = []; selectedItems = new Set(); }}
+							disabled={scanning || importing}
+							on:click={() => {
+								mediaType = value;
+								scanResults = [];
+								selectedItems = new Set();
+							}}
 						>
 							<span class="type-icon">{typeIcons[value]}</span>
 							{label}
@@ -220,13 +232,18 @@
 			<div class="profile-select">
 				<label for="profile">Quality profile</label>
 				<select id="profile" bind:value={selectedProfileId}>
-					{#each profiles as p}
+					<option value={0}>Automatic (match media type)</option>
+					{#each matchingProfiles as p}
 						<option value={p.id}>{p.name}</option>
 					{/each}
 				</select>
 			</div>
 
-			<button class="scan-btn" on:click={scan} disabled={scanning || !importPath.trim()}>
+			<button
+				class="scan-btn"
+				on:click={scan}
+				disabled={scanning || importing || !importPath.trim()}
+			>
 				{#if scanning}
 					Scanning...
 				{:else}
@@ -239,7 +256,9 @@
 	{#if scanResults.length > 0}
 		<div class="results-header">
 			<div class="results-info">
-				<span class="results-count">{scanResults.length} item{scanResults.length !== 1 ? 's' : ''} found</span>
+				<span class="results-count"
+					>{scanResults.length} item{scanResults.length !== 1 ? 's' : ''} found</span
+				>
 				{#if importableCount > 0}
 					<span class="results-matched">{importableCount} matched</span>
 				{/if}
@@ -289,7 +308,9 @@
 					{#if matchPoster(item)}
 						<img
 							class="result-poster"
-							src={matchPoster(item).startsWith('http') ? api.imageUrl(matchPoster(item)) : matchPoster(item)}
+							src={matchPoster(item).startsWith('http')
+								? api.imageUrl(matchPoster(item))
+								: matchPoster(item)}
 							alt=""
 							loading="lazy"
 						/>
@@ -307,14 +328,24 @@
 							{/if}
 						</div>
 						<div class="result-meta">
-							<span class="result-files">{fileCount(item)} file{fileCount(item) !== 1 ? 's' : ''}</span>
+							<span class="result-files"
+								>{fileCount(item)} file{fileCount(item) !== 1 ? 's' : ''}</span
+							>
 							{#if item.episode}
-								<span class="result-episodes">{item.episode} episode{item.episode !== 1 ? 's' : ''}</span>
+								<span class="result-episodes"
+									>{item.episode} episode{item.episode !== 1 ? 's' : ''}</span
+								>
 							{/if}
-							<span class="result-path" title={item.source_path}>{item.source_path.split('/').pop() || item.source_path.split('\\').pop()}</span>
+							<span class="result-path" title={item.source_path}
+								>{item.source_path.split('/').pop() || item.source_path.split('\\').pop()}</span
+							>
 						</div>
 						{#if item.match?.overview}
-							<p class="result-overview">{item.match.overview.substring(0, 120)}{item.match.overview.length > 120 ? '...' : ''}</p>
+							<p class="result-overview">
+								{item.match.overview.substring(0, 120)}{item.match.overview.length > 120
+									? '...'
+									: ''}
+							</p>
 						{/if}
 						{#if item.in_library}
 							<span class="badge badge-in-library">In Library</span>
@@ -587,7 +618,7 @@
 		align-items: center;
 		justify-content: center;
 	}
-	.result-check input[type="checkbox"] {
+	.result-check input[type='checkbox'] {
 		accent-color: var(--accent);
 		width: 16px;
 		height: 16px;
@@ -719,7 +750,9 @@
 		margin-bottom: 1rem;
 	}
 	@keyframes spin {
-		to { transform: rotate(360deg); }
+		to {
+			transform: rotate(360deg);
+		}
 	}
 
 	@media (max-width: 768px) {

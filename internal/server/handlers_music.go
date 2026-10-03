@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"mediaforge/internal/indexer"
 	"mediaforge/internal/metadata"
@@ -193,12 +194,12 @@ func (s *Server) handleMusicTrending(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendingAlbum struct {
-		Name      string `json:"name"`
-		Artist    string `json:"artist"`
+		Name       string `json:"name"`
+		Artist     string `json:"artist"`
 		ArtistMBID string `json:"artist_mbid"`
-		MBID      string `json:"mbid"`
-		ImageURL  string `json:"image_url"`
-		Playcount string `json:"playcount"`
+		MBID       string `json:"mbid"`
+		ImageURL   string `json:"image_url"`
+		Playcount  string `json:"playcount"`
 	}
 
 	var albums []trendingAlbum
@@ -284,22 +285,22 @@ func (s *Server) handleMusicAlbum(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ReleaseGroupID  string `json:"release_group_id"`
-		ArtistMBID      string `json:"artist_mbid"`
-		ArtistName      string `json:"artist_name"`
-		AlbumTitle      string `json:"album_title"`
-		Year            int    `json:"year"`
-		AlbumType       string `json:"album_type"`
-		ProfileID       int    `json:"quality_profile_id"`
-		ImageURL        string `json:"image_url"`
+		ReleaseGroupID string `json:"release_group_id"`
+		ArtistMBID     string `json:"artist_mbid"`
+		ArtistName     string `json:"artist_name"`
+		AlbumTitle     string `json:"album_title"`
+		Year           int    `json:"year"`
+		AlbumType      string `json:"album_type"`
+		ProfileID      int    `json:"quality_profile_id"`
+		ImageURL       string `json:"image_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
 
-	if req.ReleaseGroupID == "" || req.ArtistName == "" || req.AlbumTitle == "" {
-		writeError(w, 400, "release_group_id, artist_name, and album_title required")
+	if strings.TrimSpace(req.ReleaseGroupID) == "" || strings.TrimSpace(req.ArtistMBID) == "" || strings.TrimSpace(req.ArtistName) == "" || strings.TrimSpace(req.AlbumTitle) == "" {
+		writeError(w, 400, "release_group_id, artist_mbid, artist_name, and album_title required")
 		return
 	}
 
@@ -307,18 +308,39 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 		req.AlbumType = "album"
 	}
 
+	var err error
+	req.ProfileID, err = s.resolveProfile(req.ProfileID, "music")
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	// Fetch complete metadata before opening a transaction or creating an album.
+	var release *metadata.MBRelease
+	if s.musicbrainz != nil {
+		release, err = s.musicbrainz.GetBestRelease(req.ReleaseGroupID)
+		if err != nil {
+			writeError(w, 502, "failed to fetch album tracks: "+err.Error())
+			return
+		}
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback()
 	// Check if already in library
 	var existing int
-	if err := s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, req.ReleaseGroupID).Scan(&existing); err == nil {
+	if err := tx.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, req.ReleaseGroupID).Scan(&existing); err == nil {
 		writeJSON(w, 200, map[string]interface{}{"id": existing, "message": "already in library"})
 		return
 	}
 
 	// Find or create artist
 	var artistID int
-	err := s.db.QueryRow(`SELECT id FROM artists WHERE mbid = ?`, req.ArtistMBID).Scan(&artistID)
+	err = tx.QueryRow(`SELECT id FROM artists WHERE mbid = ?`, req.ArtistMBID).Scan(&artistID)
 	if err != nil {
-		result, err := s.db.Exec(`INSERT INTO artists (mbid, name, sort_name) VALUES (?, ?, ?)`,
+		result, err := tx.Exec(`INSERT INTO artists (mbid, name, sort_name) VALUES (?, ?, ?)`,
 			req.ArtistMBID, req.ArtistName, req.ArtistName)
 		if err != nil {
 			writeError(w, 500, "create artist: "+err.Error())
@@ -329,7 +351,7 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Create album
-	result, err := s.db.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status)
+	result, err := tx.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'wanted')`,
 		artistID, req.ReleaseGroupID, req.AlbumTitle, req.Year, req.AlbumType, req.ProfileID, req.ImageURL)
 	if err != nil {
@@ -338,32 +360,36 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 	}
 	albumID, _ := result.LastInsertId()
 
-	// Fetch tracks from MusicBrainz and insert them
-	if s.musicbrainz != nil {
-		release, err := s.musicbrainz.GetBestRelease(req.ReleaseGroupID)
-		if err == nil && release != nil {
-			trackCount := 0
-			for _, media := range release.Media {
-				for _, track := range media.Tracks {
-					s.db.Exec(`INSERT INTO tracks (album_id, mbid, title, number, disc_number, duration_ms)
-						VALUES (?, ?, ?, ?, ?, ?)`,
-						albumID, track.Recording.ID, track.Title, track.Position, media.Position, track.Length)
-					trackCount++
+	if release != nil {
+		trackCount := 0
+		for _, media := range release.Media {
+			for _, track := range media.Tracks {
+				if _, err := tx.Exec(`INSERT INTO tracks (album_id,mbid,title,number,disc_number,duration_ms) VALUES (?,?,?,?,?,?)`, albumID, track.Recording.ID, track.Title, track.Position, media.Position, track.Length); err != nil {
+					writeError(w, 500, "failed to save tracks")
+					return
 				}
+				trackCount++
 			}
-			s.db.Exec(`UPDATE albums SET track_count = ?, mbid = ? WHERE id = ?`, trackCount, release.ID, albumID)
+		}
+		if _, err := tx.Exec(`UPDATE albums SET track_count = ?, mbid = ? WHERE id = ?`, trackCount, release.ID, albumID); err != nil {
+			writeError(w, 500, "failed to save album tracks")
+			return
 		}
 	}
 
 	// Fetch and cache cover art
-	if s.coverart != nil {
-		go s.coverart.GetCover(req.ReleaseGroupID)
-	}
 
 	// Log activity
-	s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'added', ?)`,
+	tx.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'added', ?)`,
 		albumID, fmt.Sprintf("Added %s - %s", req.ArtistName, req.AlbumTitle))
 
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "failed to save album")
+		return
+	}
+	if coverart := s.coverart; coverart != nil {
+		go coverart.GetCover(req.ReleaseGroupID)
+	}
 	writeJSON(w, 201, map[string]int64{"id": albumID})
 }
 
@@ -586,29 +612,71 @@ func (s *Server) handleDeleteMusicLibraryItem(w http.ResponseWriter, r *http.Req
 		writeError(w, 400, "invalid id")
 		return
 	}
-
-	// Clear references first
-	s.db.Exec(`UPDATE downloads SET album_id = NULL WHERE album_id = ?`, id)
-	s.db.Exec(`UPDATE activity_log SET album_id = NULL WHERE album_id = ?`, id)
-	s.db.Exec(`DELETE FROM tracks WHERE album_id = ?`, id)
-
-	// Get artist_id before deleting album
 	var artistID int
-	s.db.QueryRow(`SELECT artist_id FROM albums WHERE id = ?`, id).Scan(&artistID)
-	s.db.Exec(`DELETE FROM albums WHERE id = ?`, id)
-
-	// Clean up orphan artist if they have no other albums
-	if artistID > 0 {
-		var count int
-		s.db.QueryRow(`SELECT COUNT(*) FROM albums WHERE artist_id = ?`, artistID).Scan(&count)
-		if count == 0 {
-			s.db.Exec(`DELETE FROM artists WHERE id = ?`, artistID)
+	if err := s.db.QueryRow(`SELECT artist_id FROM albums WHERE id = ?`, id).Scan(&artistID); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, 404, "album not found")
+		} else {
+			writeError(w, 500, "database error")
+		}
+		return
+	}
+	rows, err := s.db.Query(`SELECT id,download_type,COALESCE(sabnzbd_nzo_id,''),COALESCE(qbt_hash,'') FROM downloads WHERE album_id = ? AND status NOT IN ('imported','failed')`, id)
+	if err != nil {
+		writeError(w, 500, "failed to load album downloads")
+		return
+	}
+	type transfer struct {
+		id              int
+		kind, nzb, hash string
+	}
+	var transfers []transfer
+	for rows.Next() {
+		var transfer transfer
+		if err := rows.Scan(&transfer.id, &transfer.kind, &transfer.nzb, &transfer.hash); err != nil {
+			rows.Close()
+			writeError(w, 500, "failed to read downloads")
+			return
+		}
+		transfers = append(transfers, transfer)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		writeError(w, 500, "failed to read downloads")
+		return
+	}
+	for _, t := range transfers {
+		if err := s.cancelClientDownload(t.id, t.kind, sql.NullString{String: t.hash, Valid: t.hash != ""}, sql.NullString{String: t.nzb, Valid: t.nzb != ""}); err != nil {
+			writeError(w, 502, "failed to cancel album download: "+err.Error())
+			return
 		}
 	}
 
-	s.db.Exec(`INSERT INTO activity_log (action, details) VALUES ('deleted', ?)`,
-		fmt.Sprintf("Removed album ID %d from music library", id))
-
+	tx, err := s.db.Begin()
+	if err != nil {
+		writeError(w, 500, "database error")
+		return
+	}
+	defer tx.Rollback()
+	for _, query := range []string{`DELETE FROM downloads WHERE album_id = ?`, `UPDATE activity_log SET album_id = NULL WHERE album_id = ?`, `DELETE FROM albums WHERE id = ?`} {
+		if _, err := tx.Exec(query, id); err != nil {
+			writeError(w, 500, "failed to delete album")
+			return
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM artists WHERE id = ? AND NOT EXISTS (SELECT 1 FROM albums WHERE artist_id = ?)`, artistID, artistID); err != nil {
+		writeError(w, 500, "failed to clean up artist")
+		return
+	}
+	if _, err := tx.Exec(`INSERT INTO activity_log(action,details) VALUES ('deleted',?)`, fmt.Sprintf("Removed album ID %d from music library", id)); err != nil {
+		writeError(w, 500, "failed to save activity")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, 500, "failed to delete album")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
@@ -680,13 +748,21 @@ func (s *Server) handleRateMusicAlbum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = s.db.Exec(`UPDATE albums SET rating = ?, rating_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+	if req.Rating < 1 || req.Rating > 5 {
+		writeError(w, 400, "rating must be between 1 and 5")
+		return
+	}
+	result, err := s.db.Exec(`UPDATE albums SET rating = ?, rating_comment = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		req.Rating, req.Comment, id)
 	if err != nil {
 		writeError(w, 500, "database error")
 		return
 	}
 
+	if count, _ := result.RowsAffected(); count == 0 {
+		writeError(w, 404, "album not found")
+		return
+	}
 	writeJSON(w, 200, map[string]string{"status": "updated"})
 }
 
@@ -710,79 +786,26 @@ func (s *Server) handleGrabMusicRelease(w http.ResponseWriter, r *http.Request) 
 		AlbumID      int    `json:"album_id"`
 		DownloadType string `json:"download_type"`
 		TopicID      int    `json:"topic_id"`
+		Title        string `json:"title"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, 400, "invalid JSON")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AlbumID <= 0 {
+		writeError(w, 400, "valid album_id and JSON required")
 		return
 	}
-
-	if req.AlbumID == 0 {
-		writeError(w, 400, "album_id required")
-		return
-	}
-
-	// Get album title
 	var title string
-	s.db.QueryRow(`SELECT title FROM albums WHERE id = ?`, req.AlbumID).Scan(&title)
-
-	if req.DownloadType == "torrent" && req.TopicID > 0 {
-		// Torrent grab via Rutracker
-		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
-		if len(rtIndexers) == 0 {
-			writeError(w, 400, "no rutracker indexers configured")
-			return
-		}
-		idx := rtIndexers[0]
-
-		torrentData, err := s.rutracker.DownloadTorrent(req.TopicID, idx.Username, idx.Password)
-		if err != nil {
-			writeError(w, 502, "torrent download failed: "+err.Error())
-			return
-		}
-
-		result, err := s.db.Exec(`INSERT INTO downloads (album_id, nzb_title, download_type) VALUES (?, ?, 'torrent')`,
-			req.AlbumID, title)
-		if err != nil {
-			writeError(w, 500, "database error: "+err.Error())
-			return
-		}
-		dlID, _ := result.LastInsertId()
-
-		_, err = s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
-		if err != nil {
-			writeError(w, 502, "qBittorrent failed: "+err.Error())
-			return
-		}
-
-		s.db.Exec(`UPDATE albums SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, req.AlbumID)
-		s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'grabbed', ?)`,
-			req.AlbumID, fmt.Sprintf("Grabbed torrent for %s", title))
-
-		writeJSON(w, 200, map[string]string{"status": "grabbed"})
+	if err := s.db.QueryRow(`SELECT title FROM albums WHERE id=?`, req.AlbumID).Scan(&title); err != nil {
+		writeError(w, 404, "album not found")
 		return
 	}
-
-	// NZB grab (existing flow)
-	if req.ReleaseURL == "" {
-		writeError(w, 400, "release_url required for NZB grab")
-		return
+	if req.Title != "" {
+		title = req.Title
 	}
-
-	nzoID, err := s.grabber.GrabNZB(req.ReleaseURL, title)
+	nzoID, err := s.enqueueRelease(0, 0, req.AlbumID, indexer.Release{Title: title, NZBURL: req.ReleaseURL, DownloadType: req.DownloadType, TopicID: req.TopicID})
 	if err != nil {
-		writeError(w, 502, "grab failed: "+err.Error())
+		writeError(w, 502, err.Error())
 		return
 	}
-
-	s.db.Exec(`INSERT INTO downloads (album_id, nzb_title, sabnzbd_nzo_id, download_type) VALUES (?, ?, ?, 'nzb')`,
-		req.AlbumID, title, nzoID)
-
-	s.db.Exec(`UPDATE albums SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, req.AlbumID)
-
-	s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'grabbed', ?)`,
-		req.AlbumID, fmt.Sprintf("Grabbed release for %s", title))
-
-	writeJSON(w, 200, map[string]string{"nzo_id": nzoID})
+	writeJSON(w, 200, map[string]string{"status": "grabbed", "nzo_id": nzoID})
 }
 
 // -- Cover Art --
@@ -814,10 +837,10 @@ func (s *Server) handleMusicCover(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadProfile(profileID int) *indexer.QualityProfile {
 	var profile indexer.QualityProfile
-	err := s.db.QueryRow(`SELECT id, name, qualities, tags, language, reject_patterns, upgrade_allowed, COALESCE(profile_type, 'video')
+	err := s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed, COALESCE(profile_type, 'video'), scoring_config
 		FROM quality_profiles WHERE id = ?`, profileID).Scan(
 		&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType)
+		&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed, &profile.ProfileType, &profile.ScoringConfig)
 	if err != nil {
 		return nil
 	}

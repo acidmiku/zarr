@@ -3,16 +3,20 @@ package grabber
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 )
 
 // Grabber downloads NZB files and sends them to SABnzbd.
 type Grabber struct {
+	mu           sync.RWMutex
 	proxyClient  *http.Client // for downloading NZBs from indexers
 	directClient *http.Client // for communicating with SABnzbd
 	sabnzbdURL   string
@@ -30,6 +34,8 @@ func New(proxyClient, directClient *http.Client, sabnzbdURL, sabnzbdKey string) 
 
 // UpdateConfig updates the SABnzbd connection details.
 func (g *Grabber) UpdateConfig(sabnzbdURL, sabnzbdKey string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	g.sabnzbdURL = sabnzbdURL
 	g.sabnzbdKey = sabnzbdKey
 }
@@ -37,12 +43,12 @@ func (g *Grabber) UpdateConfig(sabnzbdURL, sabnzbdKey string) {
 // GrabNZB downloads an NZB from the indexer and sends it to SABnzbd.
 // Returns the SABnzbd nzo_id for tracking.
 func (g *Grabber) GrabNZB(nzbURL, nzbName string) (string, error) {
-	slog.Info("grabbing NZB", "name", nzbName, "url", nzbURL)
+	slog.Info("grabbing NZB", "name", nzbName)
 
 	// Download NZB via proxy (it's on the indexer's domain)
 	resp, err := g.proxyClient.Get(nzbURL)
 	if err != nil {
-		return "", fmt.Errorf("download NZB: %w", err)
+		return "", fmt.Errorf("download NZB: request failed")
 	}
 	defer resp.Body.Close()
 
@@ -50,9 +56,19 @@ func (g *Grabber) GrabNZB(nzbURL, nzbName string) (string, error) {
 		return "", fmt.Errorf("NZB download HTTP %d", resp.StatusCode)
 	}
 
-	nzbData, err := io.ReadAll(resp.Body)
+	nzbData, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20+1))
 	if err != nil {
 		return "", fmt.Errorf("read NZB: %w", err)
+	}
+
+	if len(nzbData) > 32<<20 {
+		return "", fmt.Errorf("NZB exceeds 32 MiB limit")
+	}
+	var document struct {
+		XMLName xml.Name `xml:"nzb"`
+	}
+	if err := xml.Unmarshal(nzbData, &document); err != nil {
+		return "", fmt.Errorf("indexer did not return a valid NZB")
 	}
 
 	// Send NZB to SABnzbd via direct client (local network)
@@ -79,8 +95,7 @@ func (g *Grabber) sendToSABnzbd(nzbData []byte, nzbName string) (string, error) 
 	}
 	w.Close()
 
-	u := fmt.Sprintf("%s/api?mode=addfile&cat=mediaforge&apikey=%s&nzbname=%s&output=json",
-		g.sabnzbdURL, g.sabnzbdKey, url.QueryEscape(nzbName))
+	u := g.apiURL("addfile", url.Values{"cat": {"mediaforge"}, "nzbname": {nzbName}})
 
 	req, err := http.NewRequest("POST", u, &buf)
 	if err != nil {
@@ -90,9 +105,12 @@ func (g *Grabber) sendToSABnzbd(nzbData []byte, nzbName string) (string, error) 
 
 	resp, err := g.directClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("SABnzbd request failed")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SABnzbd HTTP %d", resp.StatusCode)
+	}
 
 	var result struct {
 		Status bool     `json:"status"`
@@ -133,69 +151,97 @@ type SABHistory struct {
 type SABHistorySlot struct {
 	NzoID       string `json:"nzo_id"`
 	Name        string `json:"name"`
-	Status      string `json:"status"` // Completed, Failed, etc.
+	Status      string `json:"status"`  // Completed, Failed, etc.
 	Storage     string `json:"storage"` // final path
 	FailMessage string `json:"fail_message"`
 }
 
-// GetQueue returns the current SABnzbd download queue.
-func (g *Grabber) GetQueue() (*SABQueue, error) {
-	u := fmt.Sprintf("%s/api?mode=queue&output=json&apikey=%s", g.sabnzbdURL, g.sabnzbdKey)
-	resp, err := g.directClient.Get(u)
+// apiURL safely encodes credentials and supports a reverse-proxy base path.
+func (g *Grabber) apiURL(mode string, extra url.Values) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	u, err := url.Parse(strings.TrimRight(g.sabnzbdURL, "/") + "/api")
 	if err != nil {
-		return nil, err
+		return ""
 	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Queue SABQueue `json:"queue"`
+	q := u.Query()
+	q.Set("mode", mode)
+	q.Set("output", "json")
+	q.Set("apikey", g.sabnzbdKey)
+	for key, values := range extra {
+		q[key] = values
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result.Queue, nil
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
-// GetHistory returns the SABnzbd download history.
-func (g *Grabber) GetHistory() (*SABHistory, error) {
-	u := fmt.Sprintf("%s/api?mode=history&output=json&apikey=%s", g.sabnzbdURL, g.sabnzbdKey)
-	resp, err := g.directClient.Get(u)
+func (g *Grabber) call(mode string, params url.Values, target any) error {
+	resp, err := g.directClient.Get(g.apiURL(mode, params))
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		History SABHistory `json:"history"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result.History, nil
-}
-
-// DeleteFromQueue removes a download from the SABnzbd queue.
-func (g *Grabber) DeleteFromQueue(nzoID string) error {
-	u := fmt.Sprintf("%s/api?mode=queue&name=delete&value=%s&output=json&apikey=%s",
-		g.sabnzbdURL, nzoID, g.sabnzbdKey)
-	resp, err := g.directClient.Get(u)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// TestConnection verifies SABnzbd is reachable.
-func (g *Grabber) TestConnection() error {
-	u := fmt.Sprintf("%s/api?mode=version&output=json&apikey=%s", g.sabnzbdURL, g.sabnzbdKey)
-	resp, err := g.directClient.Get(u)
-	if err != nil {
-		return fmt.Errorf("SABnzbd unreachable: %w", err)
+		return fmt.Errorf("SABnzbd request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("SABnzbd HTTP %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return fmt.Errorf("read SABnzbd response: %w", err)
+	}
+	var envelope struct {
+		Status *bool  `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return fmt.Errorf("invalid SABnzbd response: %w", err)
+	}
+	if envelope.Error != "" || (envelope.Status != nil && !*envelope.Status) {
+		return fmt.Errorf("SABnzbd rejected the request; check credentials and configuration")
+	}
+	return json.Unmarshal(body, target)
+}
+
+func (g *Grabber) GetQueue() (*SABQueue, error) {
+	var result struct {
+		Queue *SABQueue `json:"queue"`
+	}
+	if err := g.call("queue", nil, &result); err != nil {
+		return nil, err
+	}
+	if result.Queue == nil {
+		return nil, fmt.Errorf("SABnzbd response missing queue")
+	}
+	return result.Queue, nil
+}
+
+func (g *Grabber) GetHistory() (*SABHistory, error) {
+	var result struct {
+		History *SABHistory `json:"history"`
+	}
+	if err := g.call("history", url.Values{"limit": {"1000"}}, &result); err != nil {
+		return nil, err
+	}
+	if result.History == nil {
+		return nil, fmt.Errorf("SABnzbd response missing history")
+	}
+	return result.History, nil
+}
+
+func (g *Grabber) DeleteFromQueue(nzoID string) error {
+	var result struct {
+		Status bool `json:"status"`
+	}
+	if err := g.call("queue", url.Values{"name": {"delete"}, "value": {nzoID}}, &result); err != nil {
+		return err
+	}
+	if !result.Status {
+		return fmt.Errorf("SABnzbd did not confirm deletion")
+	}
 	return nil
+}
+
+// TestConnection uses an authenticated endpoint; version is public on some SABnzbd versions.
+func (g *Grabber) TestConnection() error {
+	_, err := g.GetQueue()
+	return err
 }

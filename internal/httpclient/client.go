@@ -69,6 +69,7 @@ func New(proxyURL string) (*Clients, error) {
 		}
 	}
 
+	proxyClient.Transport = &switchTransport{current: proxyClient.Transport}
 	return &Clients{
 		Proxy:  proxyClient,
 		Direct: direct,
@@ -80,16 +81,24 @@ func makeProxyTransport(proxyURL string) (*http.Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse proxy URL: %w", err)
 	}
+	if u.Hostname() == "" {
+		return nil, fmt.Errorf("proxy URL requires a host")
+	}
 
 	switch u.Scheme {
 	case "socks5", "socks5h":
-		dialer, err := proxy.SOCKS5("tcp", u.Host, nil, proxy.Direct)
+		var auth *proxy.Auth
+		if u.User != nil {
+			password, _ := u.User.Password()
+			auth = &proxy.Auth{User: u.User.Username(), Password: password}
+		}
+		dialer, err := proxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{Timeout: 30 * time.Second})
 		if err != nil {
 			return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
 		}
 		return &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
+				return dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
 			},
 		}, nil
 

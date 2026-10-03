@@ -46,7 +46,7 @@
 			results = Array.isArray(data)
 				? data.map((item) => ({
 						...item,
-						type: type === 'anime' ? 'series' : type,
+						type: item.type || (type === 'anime' ? 'series' : type),
 						is_anime: type === 'anime' || item.is_anime
 					}))
 				: [];
@@ -139,6 +139,7 @@
 					status={item.status}
 					inLibrary={item.in_library}
 					anime={item.is_anime}
+					mediaType={item.type}
 					on:click={() => showDetail(item)}
 				/>{/each}
 		</div>{/if}

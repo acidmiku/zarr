@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 
 	"mediaforge/internal/indexer"
 )
@@ -45,35 +46,36 @@ func (s *Server) handleSearchReleases(w http.ResponseWriter, r *http.Request) {
 			// Movie search
 			var title, imdbID string
 			var year, profileID int
-			s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0)
-				FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID)
+			var anime bool
+			s.db.QueryRow(`SELECT title, COALESCE(imdb_id,''), COALESCE(year,0), COALESCE(quality_profile_id,0), anime
+				FROM media_items WHERE id = ?`, mediaItemID).Scan(&title, &imdbID, &year, &profileID, &anime)
 
 			allIndexers := s.loadIndexers()
 
-			newznabIdxs := filterIndexersByType(allIndexers, "newznab", "movie")
+			newznabIdxs := indexer.MovieIndexers(allIndexers, "newznab", anime)
 			releases = s.newznab.SearchMovie(newznabIdxs, imdbID, title, year)
 			for i := range releases {
 				releases[i].DownloadType = "nzb"
 			}
 
-			rtIndexers := filterIndexersByType(allIndexers, "rutracker", "movie")
+			rtIndexers := indexer.MovieIndexers(allIndexers, "rutracker", anime)
 			if len(rtIndexers) > 0 {
 				query := title
 				if year > 0 {
 					query = fmt.Sprintf("%s %d", title, year)
 				}
-				rtReleases := s.searchRutracker(rtIndexers, query, "movie")
+				rtContentType := "movie"
+				if anime {
+					rtContentType = "anime"
+				}
+				rtReleases := indexer.FilterMovieReleases(s.searchRutracker(rtIndexers, query, rtContentType), title, year)
 				releases = append(releases, rtReleases...)
 			}
 
-			var profile indexer.QualityProfile
-			s.db.QueryRow(`SELECT id, name, qualities, COALESCE(tags,'{}'), language, COALESCE(reject_patterns,'[]'), upgrade_allowed
-				FROM quality_profiles WHERE id = ?`, profileID).Scan(
-				&profile.ID, &profile.Name, &profile.Qualities, &profile.Tags,
-				&profile.Language, &profile.RejectPatterns, &profile.UpgradeAllowed)
+			profile := s.loadProfile(profileID)
 
 			for i := range releases {
-				indexer.ScoreRelease(&releases[i], &profile)
+				indexer.ScoreRelease(&releases[i], profile)
 			}
 		}
 	}
@@ -81,6 +83,12 @@ func (s *Server) handleSearchReleases(w http.ResponseWriter, r *http.Request) {
 	// Mark blacklisted releases as rejected (but keep visible for browsing)
 	blacklist := s.loadBlacklist(mediaItemID, episodeID)
 	releases = indexer.MarkBlacklisted(releases, blacklist)
+	sort.SliceStable(releases, func(i, j int) bool {
+		if releases[i].Acceptable != releases[j].Acceptable {
+			return releases[i].Acceptable
+		}
+		return indexer.CompareReleases(&releases[i], &releases[j]) > 0
+	})
 
 	if releases == nil {
 		releases = []indexer.Release{}
@@ -135,70 +143,14 @@ func (s *Server) handleGrabRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grabTitle := req.Title
-	if grabTitle == "" {
-		grabTitle = "manual-grab"
-	}
-
-	var epID interface{}
-	if req.EpisodeID > 0 {
-		epID = req.EpisodeID
-		s.db.Exec(`UPDATE episodes SET status = 'downloading' WHERE id = ?`, req.EpisodeID)
-	} else {
-		s.db.Exec(`UPDATE media_items SET status = 'downloading' WHERE id = ?`, req.MediaItemID)
-	}
-
-	if req.DownloadType == "torrent" && req.TopicID > 0 {
-		rtIndexers := filterIndexersByType(s.loadIndexers(), "rutracker", "")
-		if len(rtIndexers) == 0 {
-			writeError(w, 400, "no rutracker indexers configured")
-			return
-		}
-		idx := rtIndexers[0]
-
-		torrentData, err := s.rutracker.DownloadTorrent(req.TopicID, idx.Username, idx.Password)
-		if err != nil {
-			writeError(w, 502, "torrent download failed: "+err.Error())
-			return
-		}
-
-		result, err := s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, download_type) VALUES (?, ?, ?, 'torrent')`,
-			req.MediaItemID, epID, grabTitle)
-		if err != nil {
-			writeError(w, 500, "database error: "+err.Error())
-			return
-		}
-		dlID, _ := result.LastInsertId()
-
-		_, err = s.qbt.AddTorrent(torrentData, fmt.Sprintf("dl_%d.torrent", dlID), int(dlID))
-		if err != nil {
-			writeError(w, 502, "qBittorrent failed: "+err.Error())
-			return
-		}
-
-		s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
-			VALUES (?, ?, 'grabbed', ?)`, req.MediaItemID, epID, "Manual grab: "+grabTitle)
-
-		writeJSON(w, 200, map[string]string{"status": "grabbed"})
+	if req.MediaItemID <= 0 || req.EpisodeID < 0 {
+		writeError(w, 400, "invalid library item")
 		return
 	}
-
-	if req.ReleaseURL == "" {
-		writeError(w, 400, "release_url required for NZB grab")
-		return
-	}
-
-	nzoID, err := s.grabber.GrabNZB(req.ReleaseURL, grabTitle)
+	nzoID, err := s.enqueueRelease(req.MediaItemID, req.EpisodeID, 0, indexer.Release{Title: req.Title, NZBURL: req.ReleaseURL, DownloadType: req.DownloadType, TopicID: req.TopicID})
 	if err != nil {
-		writeError(w, 500, "grab failed: "+err.Error())
+		writeError(w, 502, err.Error())
 		return
 	}
-
-	s.db.Exec(`INSERT INTO downloads (media_item_id, episode_id, nzb_title, sabnzbd_nzo_id, download_type)
-		VALUES (?, ?, ?, ?, 'nzb')`, req.MediaItemID, epID, grabTitle, nzoID)
-
-	s.db.Exec(`INSERT INTO activity_log (media_item_id, episode_id, action, details)
-		VALUES (?, ?, 'grabbed', ?)`, req.MediaItemID, epID, "Manual grab: "+grabTitle)
-
 	writeJSON(w, 200, map[string]string{"status": "grabbed", "nzo_id": nzoID})
 }

@@ -2,41 +2,69 @@ package indexer
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // QualityProfile represents a quality profile from the database.
 type QualityProfile struct {
 	ID             int    `json:"id"`
 	Name           string `json:"name"`
-	Qualities      string `json:"qualities"`       // JSON array
-	Tags           string `json:"tags"`             // JSON object
+	Qualities      string `json:"qualities"` // JSON array
+	Tags           string `json:"tags"`      // JSON object
 	Language       string `json:"language"`
-	RejectPatterns string `json:"reject_patterns"`  // JSON array
+	RejectPatterns string `json:"reject_patterns"` // JSON array
 	UpgradeAllowed bool   `json:"upgrade_allowed"`
 	ProfileType    string `json:"profile_type"`
+	ScoringConfig  string `json:"scoring_config"`
 }
 
 // Release represents a found release with computed score.
 type Release struct {
-	Title        string   `json:"title"`
-	NZBURL       string   `json:"nzb_url"`
-	Size         int64    `json:"size"`
-	Quality      string   `json:"quality"`
-	Tags         []string `json:"tags"`
-	Score        int      `json:"score"`
-	Indexer      string   `json:"indexer"`
-	Category     string   `json:"category"`
-	Acceptable   bool     `json:"acceptable"`
-	RejectReason string   `json:"reject_reason,omitempty"`
-	DownloadType string   `json:"download_type"`           // "nzb" or "torrent"
-	Seeders      int      `json:"seeders,omitempty"`
-	Leechers     int      `json:"leechers,omitempty"`
-	TopicID      int      `json:"topic_id,omitempty"`      // Rutracker topic ID
+	Title          string        `json:"title"`
+	NZBURL         string        `json:"nzb_url"`
+	Size           int64         `json:"size"`
+	Quality        string        `json:"quality"`
+	Tags           []string      `json:"tags"`
+	Score          int           `json:"score"`
+	Indexer        string        `json:"indexer"`
+	Category       string        `json:"category"`
+	Acceptable     bool          `json:"acceptable"`
+	RejectReason   string        `json:"reject_reason,omitempty"`
+	DownloadType   string        `json:"download_type"` // "nzb" or "torrent"
+	Seeders        int           `json:"seeders,omitempty"`
+	Leechers       int           `json:"leechers,omitempty"`
+	TopicID        int           `json:"topic_id,omitempty"` // Rutracker topic ID
+	QualityRank    int           `json:"quality_rank"`
+	FormatScore    int           `json:"format_score"`
+	MatchedFormats []FormatMatch `json:"matched_formats,omitempty"`
+	ScoringPreset  string        `json:"scoring_preset,omitempty"`
+	ScoringVersion string        `json:"scoring_version,omitempty"`
+	ReleaseGroup   string        `json:"release_group,omitempty"`
+	Languages      []string      `json:"languages,omitempty"`
 }
 
 // ScoreRelease computes a score for a release against a quality profile.
 // Returns the release with score set, or acceptable=false if rejected.
 func ScoreRelease(rel *Release, profile *QualityProfile) {
+	rel.Score = 0
+	rel.Acceptable = false
+	rel.RejectReason = ""
+	rel.QualityRank, rel.FormatScore = 0, 0
+	rel.MatchedFormats = nil
+	rel.ScoringPreset, rel.ScoringVersion = "", ""
+	if profile == nil {
+		rel.RejectReason = "quality profile not configured"
+		return
+	}
+	config, err := ResolveScoringConfig(profile.ScoringConfig)
+	if err != nil {
+		rel.RejectReason = "invalid scoring configuration: " + err.Error()
+		return
+	}
+	if config.Preset != "" {
+		scoreTRaSHRelease(rel, profile, config)
+		return
+	}
 	// Parse quality profile
 	var qualities []string
 	if err := json.Unmarshal([]byte(profile.Qualities), &qualities); err != nil {
@@ -113,7 +141,7 @@ func BestRelease(releases []Release) *Release {
 		if !releases[i].Acceptable {
 			continue
 		}
-		if best == nil || releases[i].Score > best.Score {
+		if best == nil || CompareReleases(&releases[i], best) > 0 {
 			best = &releases[i]
 		}
 	}
@@ -127,11 +155,11 @@ func FilterBlacklisted(releases []Release, blacklist []string) []Release {
 	}
 	bl := make(map[string]bool, len(blacklist))
 	for _, t := range blacklist {
-		bl[t] = true
+		bl[strings.ToLower(strings.TrimSpace(t))] = true
 	}
 	var filtered []Release
 	for _, r := range releases {
-		if bl[r.Title] {
+		if bl[strings.ToLower(strings.TrimSpace(r.Title))] {
 			continue
 		}
 		filtered = append(filtered, r)
@@ -146,10 +174,10 @@ func MarkBlacklisted(releases []Release, blacklist []string) []Release {
 	}
 	bl := make(map[string]bool, len(blacklist))
 	for _, t := range blacklist {
-		bl[t] = true
+		bl[strings.ToLower(strings.TrimSpace(t))] = true
 	}
 	for i := range releases {
-		if bl[releases[i].Title] {
+		if bl[strings.ToLower(strings.TrimSpace(releases[i].Title))] {
 			releases[i].Acceptable = false
 			releases[i].RejectReason = "blacklisted"
 			releases[i].Score = 0

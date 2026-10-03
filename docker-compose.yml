@@ -1,34 +1,37 @@
-version: "3.8"
-
 services:
+  init-connections:
+    build: .
+    image: zarr-local
+    command: ["--init-connections"]
+    volumes:
+      - ./data/config:/config
+      - ./data/sabnzbd-config:/sabnzbd-config
+      - ./data/qbittorrent-config:/qbittorrent-config
+    restart: "no"
   zarr:
     build: .
-    container_name: zarr
+    image: zarr-local
     ports:
-      - "9876:9876"
+      - "127.0.0.1:9876:9876"
     volumes:
       - ./data/config:/config
       - ./data/media:/data/media
       - ./data/usenet:/data/usenet
       - ./data/torrents:/data/torrents
-      - ./data/sabnzbd-config/Downloads:/sabnzbd-downloads
     environment:
       - TZ=Etc/UTC
-      # Optional: seed config via env vars
-      # - MEDIAFORGE_TMDB_API_KEY=...
-      # - MEDIAFORGE_PROXY=socks5://...
-      # - MEDIAFORGE_SABNZBD_API_KEY=...
     depends_on:
-      - sabnzbd
-    networks:
-      - zarr-net
+      init-connections:
+        condition: service_completed_successfully
+      sabnzbd:
+        condition: service_started
+      qbittorrent:
+        condition: service_started
     restart: unless-stopped
-
   sabnzbd:
     image: lscr.io/linuxserver/sabnzbd:latest
-    container_name: sabnzbd
     ports:
-      - "8085:8080"
+      - "127.0.0.1:8085:8080"
     volumes:
       - ./data/sabnzbd-config:/config
       - ./data/usenet:/data/usenet
@@ -36,30 +39,25 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-    networks:
-      - zarr-net
+    depends_on:
+      init-connections:
+        condition: service_completed_successfully
     restart: unless-stopped
-
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
-    container_name: qbittorrent
     ports:
-      - "9090:8080"
+      - "127.0.0.1:9090:9090"
       - "6881:6881"
       - "6881:6881/udp"
     volumes:
       - ./data/qbittorrent-config:/config
       - ./data/torrents:/data/torrents
-      - ./data/media:/data/media
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
-      - WEBUI_PORT=8080
-    networks:
-      - zarr-net
+      - WEBUI_PORT=9090
+    depends_on:
+      init-connections:
+        condition: service_completed_successfully
     restart: unless-stopped
-
-networks:
-  zarr-net:
-    driver: bridge

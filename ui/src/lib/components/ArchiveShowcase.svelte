@@ -2,6 +2,7 @@
 	import { createEventDispatcher } from 'svelte';
 	import { ArrowUpRight, Plus } from 'lucide-svelte';
 	import Artwork from './Artwork.svelte';
+	import { mediaTypeLabel } from '$lib/media';
 	import StatusBadge from './StatusBadge.svelte';
 	export let items = [];
 	export let featured = null;
@@ -31,7 +32,7 @@
 			</div>
 			<div class="feature-copy">
 				<div class="feature-meta">
-					{hero.anime || hero.is_anime ? 'Anime' : hero.type === 'movie' ? 'Movie' : 'Series'}
+					{mediaTypeLabel(hero)}
 					<span>/</span>
 					{hero.year || 'Year unknown'}
 				</div>
@@ -65,7 +66,7 @@
 				</svelte:element>
 				<div class="supporting-info">
 					<span class="eyebrow"
-						>{item.anime || item.is_anime ? 'Anime' : item.type === 'movie' ? 'Movie' : 'Series'} / {item.year ||
+						>{mediaTypeLabel(item)} / {item.year ||
 							'—'}</span
 					>
 					<h3>{item.title}</h3>
