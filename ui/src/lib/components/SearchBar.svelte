@@ -1,5 +1,6 @@
 <script>
-	import { createEventDispatcher } from 'svelte';
+	import { createEventDispatcher, onDestroy } from 'svelte';
+	import { Search, X } from 'lucide-svelte';
 
 	export let value = '';
 	export let placeholder = 'Search movies, series, anime...';
@@ -7,6 +8,7 @@
 	const dispatch = createEventDispatcher();
 
 	let timeout;
+	onDestroy(() => clearTimeout(timeout));
 	function onInput() {
 		clearTimeout(timeout);
 		timeout = setTimeout(() => {
@@ -23,16 +25,17 @@
 </script>
 
 <div class="search-bar">
-	<span class="search-icon">&#x2315;</span>
+	<span class="search-icon"><Search size={18} /></span>
 	<input
-		type="text"
+		type="search"
+		aria-label={placeholder}
 		bind:value
 		on:input={onInput}
 		on:keydown={onKeydown}
 		{placeholder}
 	/>
 	{#if value}
-		<button class="clear-btn" on:click={() => { value = ''; dispatch('search', ''); }}>&#x2715;</button>
+		<button class="clear-btn" aria-label="Clear search" on:click={() => { value = ''; dispatch('search', ''); }}><X size={15} /></button>
 	{/if}
 </div>
 
@@ -67,6 +70,7 @@
 
 	input {
 		flex: 1;
+		min-width: 0;
 		background: none;
 		border: none;
 		outline: none;

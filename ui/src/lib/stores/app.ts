@@ -9,7 +9,7 @@ export const profiles = writable<any[]>([]);
 export type ThemeName = 'dark' | 'light' | 'ember' | 'violet' | 'rose' | 'mint' | 'boringcore';
 
 export const THEMES: { id: ThemeName; label: string; group: 'dark' | 'light'; swatch: string }[] = [
-	{ id: 'dark', label: 'Obsidian', group: 'dark', swatch: '#00d4ff' },
+	{ id: 'dark', label: 'Neon Archive', group: 'dark', swatch: '#ff3b8b' },
 	{ id: 'ember', label: 'Ember', group: 'dark', swatch: '#f59e0b' },
 	{ id: 'violet', label: 'Violet', group: 'dark', swatch: '#a78bfa' },
 	{ id: 'light', label: 'Light', group: 'light', swatch: '#0891b2' },
@@ -22,7 +22,8 @@ const VALID_THEMES: Set<string> = new Set(THEMES.map(t => t.id));
 
 function getInitialTheme(): ThemeName {
 	if (browser) {
-		const stored = localStorage.getItem('mf-theme');
+		let stored = null;
+		try { stored = localStorage.getItem('mf-theme'); } catch { /* Storage may be disabled. */ }
 		if (stored && VALID_THEMES.has(stored)) return stored as ThemeName;
 	}
 	return 'dark';
@@ -33,7 +34,7 @@ export const theme = writable<ThemeName>(getInitialTheme());
 export function setTheme(name: ThemeName) {
 	theme.set(name);
 	if (browser) {
-		localStorage.setItem('mf-theme', name);
+		try { localStorage.setItem('mf-theme', name); } catch { /* Keep the in-memory preference. */ }
 		if (name === 'dark') {
 			document.documentElement.removeAttribute('data-theme');
 		} else {

@@ -41,6 +41,7 @@
 		await loadItem();
 		profiles = await api.getProfiles();
 		loading = false;
+		if (item && $page.url.searchParams.get('tab') === 'releases') viewReleases();
 	});
 
 	async function loadItem() {
@@ -463,8 +464,8 @@
 	.backdrop {
 		position: absolute;
 		top: 0;
-		left: -2rem;
-		right: -2rem;
+		left: 0;
+		right: 0;
 		height: 420px;
 		overflow: hidden;
 		z-index: 0;

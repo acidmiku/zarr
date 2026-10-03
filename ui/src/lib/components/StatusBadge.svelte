@@ -38,8 +38,8 @@
 		align-items: center;
 		gap: 0.35rem;
 		padding: 0.2rem 0.65rem;
-		border-radius: 9999px;
-		font-family: var(--font-display);
+		border-radius: var(--radius-sm);
+		font-family: var(--font-body);
 		font-size: 0.7rem;
 		font-weight: 600;
 		text-transform: uppercase;
@@ -63,7 +63,7 @@
 		height: 6px;
 		border-radius: 50%;
 		background: currentColor;
-		box-shadow: 0 0 6px currentColor;
+		box-shadow: none;
 	}
 
 	.small {

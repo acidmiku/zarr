@@ -1,11 +1,23 @@
 <script>
 	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
+	import ArchiveCategories from '$lib/components/ArchiveCategories.svelte';
 	import { api } from '$lib/api';
 	import { notify } from '$lib/stores/app';
 	import SearchBar from '$lib/components/SearchBar.svelte';
 	import MusicDetail from '$lib/components/MusicDetail.svelte';
 
 	let searchQuery = '';
+	let mounted = false;
+	let searchRequest = 0;
+	$: if (mounted) applyLocation($page.url.search);
+	function applyLocation(search) {
+		const params = new URLSearchParams(search);
+		activeTab = params.get('tab') === 'library' ? 'library' : 'discover';
+		searchType = ['album','artist','track'].includes(params.get('type')) ? params.get('type') : 'album';
+		searchQuery = params.get('q') || '';
+		handleSearch({ detail: searchQuery });
+	}
 	let results = [];
 	let trending = [];
 	let profiles = [];
@@ -25,7 +37,8 @@
 	let loadingArtistAlbums = false;
 
 	onMount(async () => {
-		profiles = await api.getProfiles();
+		mounted = true;
+		try { profiles = await api.getProfiles(); } catch (err) { notify(err.message, 'error'); }
 		loadTrending();
 		loadLibrary();
 	});
@@ -57,8 +70,10 @@
 	}
 
 	async function handleSearch(e) {
+		const request = ++searchRequest;
 		const query = e.detail;
 		if (!query) {
+			loading = false;
 			results = [];
 			artistAlbums = [];
 			selectedArtistName = '';
@@ -68,9 +83,12 @@
 		artistAlbums = [];
 		selectedArtistName = '';
 		try {
-			results = await api.musicSearch(query, searchType);
+			const data = await api.musicSearch(query, searchType);
+			if (request !== searchRequest) return;
+			results = data;
 			if (!Array.isArray(results)) results = [];
 		} catch (err) {
+			if (request !== searchRequest) return;
 			notify(err?.message || 'Search failed', 'error');
 			results = [];
 		}
@@ -132,6 +150,7 @@
 	<title>Music - Zarr</title>
 </svelte:head>
 
+<ArchiveCategories mode={activeTab === 'library' ? 'library' : 'discover'} selected="music" />
 <div class="page">
 	<header class="page-header">
 		<h1>Music</h1>
@@ -664,6 +683,7 @@
 
 	.filter-bar {
 		display: flex;
+		flex-wrap: wrap;
 		gap: 0.5rem;
 	}
 
