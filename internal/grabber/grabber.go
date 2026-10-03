@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -175,6 +176,10 @@ func (g *Grabber) apiURL(mode string, extra url.Values) string {
 	return u.String()
 }
 
+// A false status without an error means that no matching job was changed, not
+// that authentication failed. Callers must verify the job state before ignoring it.
+var errSABNoAction = errors.New("SABnzbd did not confirm the requested operation")
+
 func (g *Grabber) call(mode string, params url.Values, target any) error {
 	resp, err := g.directClient.Get(g.apiURL(mode, params))
 	if err != nil {
@@ -195,8 +200,11 @@ func (g *Grabber) call(mode string, params url.Values, target any) error {
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return fmt.Errorf("invalid SABnzbd response: %w", err)
 	}
-	if envelope.Error != "" || (envelope.Status != nil && !*envelope.Status) {
+	if envelope.Error != "" {
 		return fmt.Errorf("SABnzbd rejected the request; check credentials and configuration")
+	}
+	if envelope.Status != nil && !*envelope.Status {
+		return errSABNoAction
 	}
 	return json.Unmarshal(body, target)
 }
@@ -227,17 +235,87 @@ func (g *Grabber) GetHistory() (*SABHistory, error) {
 	return result.History, nil
 }
 
+// DeleteFromQueue cancels a tracked job, including one that has left the queue.
+// SABnzbd returns status:false for an absent queue job. Only authenticated,
+// complete lookups of that exact ID can establish that no cancellation is needed.
 func (g *Grabber) DeleteFromQueue(nzoID string) error {
+	if nzoID == "" || nzoID != strings.TrimSpace(nzoID) || strings.Contains(nzoID, ",") {
+		return fmt.Errorf("invalid SABnzbd job ID")
+	}
+	switch strings.ToLower(nzoID) {
+	case "all", "failed", "completed":
+		return fmt.Errorf("invalid SABnzbd job ID")
+	}
+	err := g.confirmAction("queue", url.Values{"name": {"delete"}, "value": {nzoID}})
+	if !errors.Is(err, errSABNoAction) {
+		return err
+	}
+	if _, found, err := g.jobStatus("queue", nzoID); err != nil {
+		return err
+	} else if found {
+		return fmt.Errorf("SABnzbd job is still queued; cancellation was not confirmed")
+	}
+	status, found, err := g.jobStatus("history", nzoID)
+	if err != nil {
+		return err
+	}
+	if !found || status == "Completed" || status == "Failed" {
+		// Leave terminal history and downloaded files intact.
+		return nil
+	}
+	// Repairing/extracting jobs live in history, not the download queue. Abort
+	// running work, then remove queued post-processing without deleting files.
+	if err := g.confirmAction("cancel_pp", url.Values{"value": {nzoID}}); err != nil {
+		return fmt.Errorf("cancel SABnzbd post-processing: %w", err)
+	}
+	return g.confirmAction("history", url.Values{"name": {"delete"}, "value": {nzoID}, "del_files": {"0"}})
+}
+
+func (g *Grabber) confirmAction(mode string, params url.Values) error {
 	var result struct {
 		Status bool `json:"status"`
 	}
-	if err := g.call("queue", url.Values{"name": {"delete"}, "value": {nzoID}}, &result); err != nil {
+	if err := g.call(mode, params, &result); err != nil {
 		return err
 	}
 	if !result.Status {
-		return fmt.Errorf("SABnzbd did not confirm deletion")
+		return fmt.Errorf("SABnzbd response missing operation status")
 	}
 	return nil
+}
+
+func (g *Grabber) jobStatus(mode, nzoID string) (string, bool, error) {
+	type jobPage struct {
+		Slots []struct {
+			NzoID  string `json:"nzo_id"`
+			Status string `json:"status"`
+		} `json:"slots"`
+		Count *int `json:"noofslots"`
+	}
+	var result struct {
+		Queue   *jobPage `json:"queue"`
+		History *jobPage `json:"history"`
+	}
+	// Filtering before pagination also finds jobs older than GetHistory's limit.
+	params := url.Values{"nzo_ids": {nzoID}, "start": {"0"}, "limit": {"1"}}
+	if err := g.call(mode, params, &result); err != nil {
+		return "", false, err
+	}
+	page := result.Queue
+	if mode == "history" {
+		page = result.History
+	}
+	if page == nil || page.Slots == nil || page.Count == nil || *page.Count != len(page.Slots) || len(page.Slots) > 1 {
+		return "", false, fmt.Errorf("SABnzbd returned an incomplete job lookup")
+	}
+	if len(page.Slots) == 0 {
+		return "", false, nil
+	}
+	job := page.Slots[0]
+	if job.NzoID != nzoID || job.Status == "" {
+		return "", false, fmt.Errorf("SABnzbd returned an unexpected job lookup")
+	}
+	return job.Status, true, nil
 }
 
 // TestConnection uses an authenticated endpoint; version is public on some SABnzbd versions.

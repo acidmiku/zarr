@@ -57,6 +57,78 @@ func TestRepeatedCancellationDoesNotNeedDownloader(t *testing.T) {
 	}
 }
 
+func TestMissingSABJobCanBeCancelledOrRemoved(t *testing.T) {
+	for _, kind := range []string{"movie", "series", "music"} {
+		for _, action := range []string{"cancel", "remove"} {
+			t.Run(kind+"/"+action, func(t *testing.T) {
+				s, remove, table := removalFixture(t, kind)
+				remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					q := r.URL.Query()
+					if q.Get("mode") == "queue" && q.Get("name") == "delete" {
+						fmt.Fprint(w, `{"status":false,"nzo_ids":[]}`)
+						return
+					}
+					if q.Get("nzo_ids") != "job-1" {
+						t.Error("did not verify the tracked job")
+					}
+					fmt.Fprintf(w, `{%q:{"slots":[],"noofslots":0}}`, q.Get("mode"))
+				}))
+				defer remote.Close()
+				s.grabber = grabber.New(remote.Client(), remote.Client(), remote.URL, "test")
+				handler := remove
+				if action == "cancel" {
+					handler = s.handleCancelDownload
+				}
+				w := callDomain(handler, "DELETE", "/", "", "id", "1")
+				if w.Code != 200 {
+					t.Fatalf("stale job blocked %s: %d %s", action, w.Code, w.Body.String())
+				}
+				if action == "cancel" {
+					var status string
+					if err := s.db.QueryRow(`SELECT status FROM downloads WHERE id=1`).Scan(&status); err != nil || status != "cancelled" {
+						t.Fatalf("download status=%s err=%v", status, err)
+					}
+					statusTable := table
+					if kind == "series" {
+						statusTable = "episodes"
+					}
+					if err := s.db.QueryRow("SELECT status FROM " + statusTable + " WHERE id=1").Scan(&status); err != nil || status != "wanted" {
+						t.Fatalf("library status=%s err=%v", status, err)
+					}
+				} else {
+					var count int
+					if err := s.db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil || count != 0 {
+						t.Fatalf("library record remains: count=%d err=%v", count, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUnverifiedSABJobStillBlocksRemoval(t *testing.T) {
+	s, remove, _ := removalFixture(t, "movie")
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("name") == "delete" {
+			fmt.Fprint(w, `{"status":false,"nzo_ids":[]}`)
+		} else {
+			fmt.Fprint(w, `{"status":false,"error":"API Key Incorrect"}`)
+		}
+	}))
+	defer remote.Close()
+	s.grabber = grabber.New(remote.Client(), remote.Client(), remote.URL, "test")
+	w := callDomain(remove, "DELETE", "/", "", "id", "1")
+	if w.Code != 502 {
+		t.Fatalf("unverified cancellation allowed removal: %d %s", w.Code, w.Body.String())
+	}
+	for _, table := range []string{"downloads", "media_items"} {
+		var status string
+		if err := s.db.QueryRow("SELECT status FROM " + table + " WHERE id=1").Scan(&status); err != nil || status != "downloading" {
+			t.Fatalf("failed cancellation changed %s: status=%s err=%v", table, status, err)
+		}
+	}
+}
+
 func TestRemovalRetryRemembersSuccessfulCancellations(t *testing.T) {
 	for _, kind := range []string{"movie", "series", "music"} {
 		t.Run(kind, func(t *testing.T) {

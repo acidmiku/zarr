@@ -4,6 +4,7 @@
 
 ### Fixes after the overhaul
 
+- Allow cancellation and library removal when a tracked SABnzbd job was deleted externally or has finished. Verify the exact job in queue/history before clearing stale state, cancel active post-processing through the correct API, and keep connection/authentication failures visible.
 - Fix title and album removal after cancelling a download: cancelled jobs are no longer sent to the downloader a second time. Repeated cancellation succeeds locally, and removal retries remember transfers already cancelled before another transfer failed.
 
 ### Anime identity and TRaSH alignment
