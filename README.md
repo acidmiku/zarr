@@ -6,6 +6,12 @@ Zarr is an all-in-one solution that replaces the traditional "arr-stack" (Sonarr
 
 ## Changelog
 
+### Unreleased — Neon Archive
+
+- New Neon Archive interface with a unified collection dashboard, responsive navigation, and live download panels.
+- [Screenshots and local verification](docs/neon-archive.md) · [Full changelog](CHANGELOG.md)
+
+
 ### v0.2.0 (2026-03-02)
 
 - **6 Color Themes** — Added Ember (warm dark), Violet (cool dark), Rose (warm light), and Mint (cool light) alongside the existing Obsidian and Light themes

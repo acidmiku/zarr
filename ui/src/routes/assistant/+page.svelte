@@ -1,5 +1,6 @@
 <script>
 	import { onMount, tick } from 'svelte';
+	import { page } from '$app/stores';
 	import { api } from '$lib/api';
 	import { notify } from '$lib/stores/app';
 	import RecommendationCard from '$lib/components/RecommendationCard.svelte';
@@ -13,6 +14,7 @@
 	let isStreaming = false;
 	let toolStatus = null;
 	let inputText = '';
+	$: if ($page.url.searchParams.has('prompt')) inputText = $page.url.searchParams.get('prompt') || '';
 	let chatContainer;
 	let settings = null;
 	let loading = true;
@@ -572,7 +574,8 @@
 
 	/* ── Page Shell ── */
 	.page {
-		height: calc(100vh - 3rem);
+		height: calc(100dvh - 180px);
+		min-height: 550px;
 		display: flex;
 		flex-direction: column;
 		font-family: var(--font-body);

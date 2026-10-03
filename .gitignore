@@ -56,3 +56,8 @@ AI_INTEGRATION_TASK.md
 tmp/
 temp/
 *.tmp
+
+# Browser verification
+ui/test-results/
+ui/playwright-report/
+ui/*.timestamp-*.mjs
