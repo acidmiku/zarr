@@ -6,7 +6,7 @@ Zarr brings discovery, release selection, download tracking, and library organiz
 
 ## Changelog
 
-### Unreleased — Neon Archive and core overhaul
+### v0.3.0 (2026-10-04) — Neon Archive and core overhaul
 
 - New Neon Archive interface with a unified collection dashboard, responsive navigation, and live download panels.
 - Quick start without mandatory keys, UI-managed connections and Usenet providers, and automatic setup of the bundled download clients.
