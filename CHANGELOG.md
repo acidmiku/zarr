@@ -1,5 +1,17 @@
 # Changelog
 
+## Music discovery and download improvements (2026-10-04)
+
+- Add a persistent local music catalog with artist aliases, genres, full paginated discographies including EPs/singles, cached metadata, shared request handling, provider cooldowns and outage fallback.
+- Add personal discovery shelves, favorites and optional Last.fm listening-history/similar-artist suggestions. Resolve external suggestions to canonical MusicBrainz albums before saving.
+- Split Save to library, Download now and album monitoring. Preserve existing monitoring intent, persist deduplicated search attempts across restarts, and distinguish source failures, no acceptable releases, transfers and verified imports.
+- Match artist, album and edition before ranking music releases. Honor the profile's codec fallbacks, relax brittle year searches, and reject unidentified quality in music profiles.
+- Prefer a standard official edition instead of maximizing track count; expose edition selection and verify selected-release membership and complete tracklists.
+- Share tag/track/identity validation across downloaded and manually imported music. Validate actual codec families, retain mismatched/incomplete source files, and stage imports transactionally before recording availability.
+- Resolve missing covers through verified alternative providers and reuse persistent disk/browser caches, saved provider choices and short-lived missing-art caches. Accept Last.fm's current artwork CDN through the image proxy.
+- See [Music discovery and downloads](docs/music.md) for behavior and remaining limitations.
+
+
 ## Unreleased
 
 ### Fixes after the overhaul

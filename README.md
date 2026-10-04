@@ -6,6 +6,13 @@ Zarr brings discovery, release selection, download tracking, and library organiz
 
 ## Changelog
 
+### Music discovery and download improvements (2026-10-04)
+
+- Cached music catalog, complete artist discographies, personal discovery shelves and verified artwork fallbacks.
+- Separate saving, downloading and monitoring, with persistent search status and retries.
+- Artist/album/edition checks before grabs, explicit edition selection, and shared tag-aware validation for downloads and manual imports.
+- [Music guide](docs/music.md) covers profiles, caching, import behavior and current limits.
+
 ### v0.3.0 (2026-10-04) — Neon Archive and core overhaul
 
 - New Neon Archive interface with a unified collection dashboard, responsive navigation, and live download panels.
@@ -42,7 +49,7 @@ Zarr brings discovery, release selection, download tracking, and library organiz
 - **UI-managed Connections** — Metadata and AI keys, download clients, indexers, Usenet providers, and proxies in Settings
 - **Release Scoring** — Quality profiles, best release selection, and automatic upgrades for the TRaSH anime presets
 - **AI Assistant** — OpenRouter recommendations with configurable models, streamed reasoning, and tool history; Kimi K3/high reasoning by default
-- **Music Support** — Artist/album management with MusicBrainz and Last.fm metadata
+- **Music Support** — Personal discovery, cached metadata/covers, edition selection, explicit downloads and tag-verified imports
 - **Existing Libraries** — Import files with metadata matching and reconcile organized media through library scans
 - **6 Themes** — Obsidian, Ember, Violet (dark) + Light, Rose, Mint (light)
 - **Ratings** — Personal 1-5 star ratings with persistent metadata
@@ -79,6 +86,7 @@ Existing installation? Follow the [upgrade notes](docs/installation.md#storage-a
 | [Installation](docs/installation.md) | Prerequisites, Docker Compose setup, directory structure |
 | [Configuration](docs/configuration.md) | TMDB, SABnzbd, qBittorrent, indexers, quality profiles, AI setup |
 | [Anime quality profiles](docs/anime-quality-profiles.md) | TRaSH presets, scoring, dual audio, upgrades, and compatibility limits |
+| [Music](docs/music.md) | Discovery, saving, monitoring, edition selection, artwork caching and verified imports |
 | [Usage](docs/usage.md) | Adding content, library management, music, AI assistant, ratings |
 | [Development](docs/development.md) | Building from source, project structure, migrations, API routes |
 | [Verification](docs/overhaul-verification.md) | Automated tests, live checks, and untested network paths |

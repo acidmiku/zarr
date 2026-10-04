@@ -25,6 +25,7 @@
 			form = {
 				media_root: settings.media_root || '/data/media',
 				proxy: settings.proxy || '',
+				lastfm_username: settings.lastfm_username || '',
 				sabnzbd_url: settings.sabnzbd_url || 'http://sabnzbd:8080',
 				qbittorrent_enabled: settings.qbittorrent_enabled === true,
 				qbittorrent_url: settings.qbittorrent_url || 'http://qbittorrent:9090',
@@ -378,6 +379,16 @@
 							bind:value={secrets.lastfm_api_key}
 							placeholder="Leave blank to keep saved key"
 						/></label
+					>
+					<label
+						>Last.fm username <span class="connection-status">Optional</span><input
+							type="text"
+							bind:value={form.lastfm_username}
+							autocomplete="off"
+							placeholder="Your Last.fm username"
+						/><span class="connection-hint"
+							>Add listening-history recommendations with your Last.fm API key. Leave empty to skip.</span
+						></label
 					>
 					<label
 						>Brave Search API key <span class="connection-status"

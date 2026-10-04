@@ -1,20 +1,92 @@
 <script>
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 	import ArchiveCategories from '$lib/components/ArchiveCategories.svelte';
 	import { api } from '$lib/api';
 	import { notify } from '$lib/stores/app';
+	import { acquisitionState, activeAcquisition, releaseGroupId } from '$lib/music';
 	import SearchBar from '$lib/components/SearchBar.svelte';
 	import MusicDetail from '$lib/components/MusicDetail.svelte';
-
-	let searchQuery = '';
+	import MusicAlbumCard from '$lib/components/MusicAlbumCard.svelte';
 	let mounted = false;
+	let disposed = false;
+	let searchQuery = '';
+	let searchType = 'album';
+	let activeTab = 'discover';
+	let results = [];
+	let profiles = [];
+	let selectedItem = null;
+	let detailOpenRequest = 0;
+	let resolvingAlbum = false;
+	let detailOpenError = '';
 	let searchRequest = 0;
-	let libraryRequest = 0;
 	let artistRequest = 0;
+	let discoveryRequest = 0;
+	let libraryRequest = 0;
+	let loading = false;
+	let searchError = '';
+	let searchRefreshing = false;
+	let discovery = {
+		recommendations: [],
+		recently_saved: [],
+		similar_artists: [],
+		played_not_owned: []
+	};
+	let discoveryTimer;
+	let enrichmentPending = false;
+	let discoveryError = '';
+	let loadingDiscovery = true;
+	let libraryAlbums = [];
+	let libraryArtists = [];
 	let libraryArtist = '';
+	let libraryView = 'albums';
+	let libraryFilter = 'all';
 	let libraryError = '';
+	let loadingLibrary = true;
+	let artistAlbums = [];
+	let selectedArtistName = '';
+	let artistType = 'all';
+	let loadingArtistAlbums = false;
+	let artistError = '';
 	$: if (mounted) applyLocation($page.url.search);
+	$: filteredArtistAlbums = artistAlbums.filter(
+		(album) => artistType === 'all' || (album.type || '').toLowerCase() === artistType.toLowerCase()
+	);
+	$: visibleLibraryAlbums = libraryAlbums.filter((album) => {
+		if (libraryArtist && album.artist_mbid !== libraryArtist) return false;
+		const status = acquisitionState(album).status;
+		if (libraryFilter === 'all') return true;
+		if (libraryFilter === 'favorites') return album.favorite;
+		if (libraryFilter === 'monitored') return album.monitored;
+		if (libraryFilter === 'attention')
+			return ['failed', 'no_results', 'blocked', 'cancelled'].includes(status);
+		if (libraryFilter === 'downloading') return activeAcquisition(album);
+		return status === libraryFilter;
+	});
+	$: shelves = [
+		{
+			title: 'Recommended for you',
+			description: 'A few records to start your next listening session.',
+			items: discovery.recommendations
+		},
+		{
+			title: 'Recently saved',
+			description: 'Your growing collection, ready when you are.',
+			items: discovery.recently_saved
+		},
+		{
+			title: 'Played but not owned',
+			description: 'Favorites from your listening history, waiting for a place in your collection.',
+			items: discovery.played_not_owned
+		},
+		{
+			title: 'From similar artists',
+			description: 'Follow the thread from artists you already enjoy.',
+			kind: 'artist',
+			items: discovery.similar_artists
+		}
+	];
 	function applyLocation(search) {
 		const params = new URLSearchParams(search);
 		activeTab = params.get('tab') === 'library' ? 'library' : 'discover';
@@ -26,962 +98,759 @@
 		searchQuery = params.get('q') || '';
 		handleSearch({ detail: searchQuery });
 	}
-	let results = [];
-	let trending = [];
-	let profiles = [];
-	let loading = false;
-	let selectedItem = null;
-	let activeTab = 'discover'; // 'discover' or 'library'
-	let searchType = 'album'; // 'album', 'artist', or 'track'
-	let libraryAlbums = [];
-	let libraryArtists = [];
-	let libraryFilter = 'all';
-	let libraryView = 'albums'; // 'albums' or 'artists'
-	let loadingLibrary = false;
-
-	// Artist search results → show their albums
-	let artistAlbums = [];
-	let selectedArtistName = '';
-	let loadingArtistAlbums = false;
-
-	onMount(async () => {
+	onMount(() => {
 		mounted = true;
-		try {
-			profiles = await api.getProfiles();
-		} catch (err) {
-			notify(err.message, 'error');
-		}
-		loadTrending();
+		api
+			.getProfiles()
+			.then((data) => {
+				if (!disposed) profiles = data;
+			})
+			.catch(() => {});
+		loadDiscovery();
 		loadLibrary();
+		const timer = setInterval(() => {
+			if (libraryAlbums.some((album) => activeAcquisition(album) || album.monitored))
+				loadLibrary(true);
+		}, 5000);
+		return () => {
+			disposed = true;
+			searchRequest++;
+			artistRequest++;
+			libraryRequest++;
+			discoveryRequest++;
+			detailOpenRequest++;
+			clearTimeout(discoveryTimer);
+			clearInterval(timer);
+		};
 	});
-
-	async function loadTrending() {
+	async function loadDiscovery(quiet = false, attempt = 0) {
+		clearTimeout(discoveryTimer);
+		const request = ++discoveryRequest;
+		if (!quiet) loadingDiscovery = true;
+		discoveryError = '';
 		try {
-			trending = await api.musicTrending(1);
-			if (!Array.isArray(trending)) trending = [];
-		} catch {
-			trending = [];
+			const data = await api.musicDiscover();
+			if (request !== discoveryRequest) return;
+			discovery = Object.fromEntries(
+				['recommendations', 'recently_saved', 'similar_artists', 'played_not_owned'].map((key) => [
+					key,
+					Array.isArray(data[key]) ? data[key] : []
+				])
+			);
+			enrichmentPending = !!data.enriching && attempt < 3;
+			if (enrichmentPending)
+				discoveryTimer = setTimeout(() => loadDiscovery(true, attempt + 1), 4000);
+			if (
+				!data.enriching &&
+				data.configured?.lastfm !== false &&
+				!Object.values(discovery).some((items) => items.length)
+			) {
+				const fallback = await api.musicTrending(1).catch(() => []);
+				if (request === discoveryRequest && Array.isArray(fallback))
+					discovery = { ...discovery, recommendations: fallback };
+			}
+		} catch (e) {
+			if (request !== discoveryRequest) return;
+			discoveryError = e.message;
+			enrichmentPending = false;
+			try {
+				const fallback = await api.musicTrending(1);
+				if (request === discoveryRequest && Array.isArray(fallback))
+					discovery = { ...discovery, recommendations: fallback };
+			} catch {}
+		} finally {
+			if (request === discoveryRequest) loadingDiscovery = false;
 		}
 	}
-
-	async function loadLibrary() {
+	async function loadLibrary(quiet = false) {
 		const request = ++libraryRequest;
-		loadingLibrary = true;
-		libraryError = '';
+		if (!quiet) loadingLibrary = true;
 		try {
 			const [albums, artists] = await Promise.all([
-				api.getMusicLibrary(libraryFilter),
-				api.getMusicArtists()
+				api.getMusicLibrary(),
+				api.getMusicArtists().catch(() => [])
 			]);
 			if (request !== libraryRequest) return;
 			libraryAlbums = Array.isArray(albums) ? albums : [];
 			libraryArtists = Array.isArray(artists) ? artists : [];
+			libraryError = '';
 		} catch (e) {
 			if (request === libraryRequest) libraryError = e.message;
 		} finally {
 			if (request === libraryRequest) loadingLibrary = false;
 		}
 	}
-	$: visibleLibraryAlbums = libraryAlbums.filter(
-		(album) => !libraryArtist || album.artist_mbid === libraryArtist
-	);
-
-	async function handleSearch(e) {
+	async function handleSearch(event) {
 		const request = ++searchRequest;
 		artistRequest++;
-		const query = e.detail;
-		if (!query) {
-			loading = false;
+		selectedArtistName = '';
+		artistAlbums = [];
+		loadingArtistAlbums = false;
+		searchError = '';
+		searchRefreshing = false;
+		results = [];
+		if (!event.detail.trim()) {
 			results = [];
-			artistAlbums = [];
-			selectedArtistName = '';
+			loading = false;
 			return;
 		}
 		loading = true;
-		artistAlbums = [];
-		selectedArtistName = '';
-		try {
-			const data = await api.musicSearch(query, searchType);
-			if (request !== searchRequest) return;
-			results = data;
-			if (!Array.isArray(results)) results = [];
-		} catch (err) {
-			if (request !== searchRequest) return;
-			notify(err?.message || 'Search failed', 'error');
-			results = [];
+		const query = event.detail.trim();
+		const type = searchType;
+		if (type !== 'track') {
+			try {
+				const cached = await api.musicSearch(query, type, true);
+				if (request !== searchRequest) return;
+				if (Array.isArray(cached) && cached.length) {
+					results = cached;
+					loading = false;
+					searchRefreshing = true;
+				}
+			} catch {}
 		}
-		loading = false;
+		if (request !== searchRequest) return;
+		try {
+			const data = await api.musicSearch(query, type);
+			if (request === searchRequest) results = Array.isArray(data) ? data : [];
+		} catch (e) {
+			if (request === searchRequest) {
+				searchError = e.message;
+			}
+		} finally {
+			if (request === searchRequest) {
+				loading = false;
+				searchRefreshing = false;
+			}
+		}
 	}
-
 	async function viewArtistAlbums(artist) {
 		const request = ++artistRequest;
+		selectedArtistName = artist.name || artist.title;
 		loadingArtistAlbums = true;
-		selectedArtistName = artist.name;
+		artistError = '';
+		artistType = 'all';
 		try {
-			const data = await api.musicArtist(artist.id);
+			const artistID = artist.artist_mbid || artist.mbid || artist.id;
+			const data = await api.musicArtist(artistID);
 			if (request !== artistRequest) return;
-			artistAlbums = (data.albums || []).map((rg) => ({
-				id: rg.id,
-				title: rg.title,
-				artist: artist.name,
-				artist_id: artist.id,
-				year: rg['first-release-date'] || '',
-				type: rg['primary-type'] || '',
-				cover_url: `https://coverartarchive.org/release-group/${rg.id}/front-250`
+			artistAlbums = (data.albums || []).map((album) => ({
+				...album,
+				release_group_id: album.release_group_id || album.id,
+				artist: selectedArtistName,
+				artist_mbid: artistID,
+				year: album.year || album['first-release-date'] || '',
+				type: album.type || album['primary-type'] || ''
 			}));
-		} catch (err) {
-			if (request !== artistRequest) return;
-			notify(err?.message || 'Failed to load artist albums', 'error');
-			artistAlbums = [];
+		} catch (e) {
+			if (request === artistRequest) {
+				artistError = e.message;
+				artistAlbums = [];
+			}
+		} finally {
+			if (request === artistRequest) loadingArtistAlbums = false;
 		}
-		loadingArtistAlbums = false;
 	}
-
-	function showDetail(item) {
-		selectedItem = item;
+	function openDiscoveryArtist(artist) {
+		searchRequest++;
+		searchQuery = artist.name;
+		searchType = 'artist';
+		results = [artist];
+		searchError = '';
+		loading = false;
+		viewArtistAlbums(artist);
 	}
-
-	function handleAdded() {
-		notify('Album added to library!', 'success');
+	function enrich(item) {
+		const rgid = releaseGroupId(item);
+		const saved = libraryAlbums.find(
+			(album) =>
+				(rgid && releaseGroupId(album) === rgid) ||
+				(item.library_id && album.id === item.library_id)
+		);
+		return saved
+			? {
+					...item,
+					in_library: true,
+					library_id: saved.id,
+					acquisition: saved.acquisition,
+					monitored: saved.monitored,
+					favorite: saved.favorite
+				}
+			: item;
+	}
+	async function showDetail(item) {
+		const request = ++detailOpenRequest;
+		detailOpenError = '';
+		resolvingAlbum = item.provider === 'lastfm';
+		try {
+			const canonical =
+				item.provider === 'lastfm'
+					? await api.musicResolve(
+							item.artist || item.artist_name || '',
+							item.title || item.name || '',
+							String(item.year || '').slice(0, 4)
+						)
+					: item;
+			if (request === detailOpenRequest) selectedItem = enrich(canonical);
+		} catch (e) {
+			if (request === detailOpenRequest)
+				detailOpenError = `Album details could not be opened: ${e.message}. Try searching by artist and album title.`;
+		} finally {
+			if (request === detailOpenRequest) resolvingAlbum = false;
+		}
+	}
+	function closeDetail() {
+		detailOpenRequest++;
+		resolvingAlbum = false;
 		selectedItem = null;
-		loadLibrary();
 	}
-
-	function setFilter(f) {
-		libraryFilter = f;
-		loadLibrary();
+	function modalAccessibility(node) {
+		const previous = document.activeElement;
+		const overflow = document.body.style.overflow;
+		document.body.style.overflow = 'hidden';
+		node.querySelector('button')?.focus();
+		function keydown(event) {
+			if (event.key === 'Escape') {
+				event.preventDefault();
+				event.stopPropagation();
+				closeDetail();
+			}
+			if (event.key !== 'Tab') return;
+			const focusable = [
+				...node.querySelectorAll(
+					'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex="0"]'
+				)
+			].filter((element) => element.getClientRects().length);
+			const first = focusable[0];
+			const last = focusable[focusable.length - 1];
+			if (event.shiftKey && document.activeElement === first) {
+				event.preventDefault();
+				last?.focus();
+			} else if (!event.shiftKey && document.activeElement === last) {
+				event.preventDefault();
+				first?.focus();
+			}
+		}
+		node.addEventListener('keydown', keydown, true);
+		return {
+			destroy() {
+				node.removeEventListener('keydown', keydown, true);
+				document.body.style.overflow = overflow;
+				if (previous?.isConnected) previous.focus();
+			}
+		};
 	}
-
+	function handleAdded(event) {
+		notify(
+			event.detail?.downloadNow ? 'Album saved. Acquisition requested.' : 'Album saved to library.',
+			'success'
+		);
+		loadLibrary(true);
+		loadDiscovery();
+	}
 	function clearSearch() {
 		searchRequest++;
 		artistRequest++;
-		loading = false;
-		loadingArtistAlbums = false;
 		searchQuery = '';
 		results = [];
-		artistAlbums = [];
 		selectedArtistName = '';
+		loading = false;
+		loadingArtistAlbums = false;
+		searchError = '';
+		searchRefreshing = false;
 	}
-
-	$: displayItems = searchQuery ? results : trending;
-	$: placeholders = {
-		album: 'Search albums...',
-		artist: 'Search artists...',
-		track: 'Search by track name...'
-	};
 </script>
 
 <svelte:window
 	on:keydown={(event) => {
-		if (event.key === 'Escape') selectedItem = null;
+		if (event.key === 'Escape') closeDetail();
 	}}
 />
-
-<svelte:head>
-	<title>Music - Zarr</title>
-</svelte:head>
-
+<svelte:head><title>Music - Zarr</title></svelte:head>
 <ArchiveCategories mode={activeTab === 'library' ? 'library' : 'discover'} selected="music" />
-<div class="page">
+<div class="page music-page">
 	<header class="page-header">
-		<h1>Music</h1>
+		<div>
+			<span class="eyebrow">Your listening room</span>
+			<h1>Music</h1>
+		</div>
 		<div class="tab-selector">
-			<button class:active={activeTab === 'discover'} on:click={() => (activeTab = 'discover')}
+			<button class:active={activeTab === 'discover'} on:click={() => goto('/music')}
 				>Discover</button
-			>
-			<button class:active={activeTab === 'library'} on:click={() => (activeTab = 'library')}
+			><button class:active={activeTab === 'library'} on:click={() => goto('/music?tab=library')}
 				>Library</button
 			>
 		</div>
 	</header>
-
+	{#if resolvingAlbum}<p role="status">Finding this album in the catalog…</p>{/if}
+	{#if detailOpenError}<p class="discovery-warning" role="alert">{detailOpenError}</p>{/if}
 	{#if activeTab === 'discover'}
 		<div class="search-row">
 			<div class="search-type-selector">
-				{#each [['album', 'Album'], ['artist', 'Artist'], ['track', 'Track']] as [value, label]}
-					<button
+				{#each [['album', 'Album'], ['artist', 'Artist'], ['track', 'Track']] as [value, label]}<button
 						class:active={searchType === value}
 						on:click={() => {
 							searchType = value;
 							clearSearch();
-						}}
-					>
-						{label}
-					</button>
-				{/each}
+						}}>{label}</button
+					>{/each}
 			</div>
 			<div class="search-bar-wrap">
 				<SearchBar
 					bind:value={searchQuery}
 					on:search={handleSearch}
-					placeholder={placeholders[searchType]}
+					placeholder={searchType === 'artist'
+						? 'Search artists…'
+						: searchType === 'track'
+							? 'Search by track name…'
+							: 'Search albums…'}
 				/>
 			</div>
 		</div>
-
-		{#if loading}
-			<div class="loading">Searching...</div>
-		{/if}
-
-		<!-- Artist search results -->
-		{#if searchQuery && searchType === 'artist' && !loading}
-			{#if selectedArtistName}
-				<div class="breadcrumb">
-					<button
-						class="link-btn"
-						on:click={() => {
-							artistAlbums = [];
-							selectedArtistName = '';
-						}}
-					>
-						← Back to artists
-					</button>
-					<h2 class="section-title">{selectedArtistName} — Albums</h2>
+		{#if loading}<div class="empty" role="status">Searching music…</div>
+		{:else if searchQuery}
+			{#if searchRefreshing}<p role="status">
+					Showing cached results. Refreshing the catalog…
+				</p>{/if}
+			{#if searchError && results.length}<p class="discovery-warning" role="status">
+					Showing cached results. The catalog could not refresh: {searchError}
+				</p>{/if}
+			{#if searchError && !results.length}<div class="empty" role="alert">
+					<h2>Search is unavailable</h2>
+					<p>{searchError}</p>
+					<button on:click={() => handleSearch({ detail: searchQuery })}>Retry search</button>
 				</div>
-				{#if loadingArtistAlbums}
-					<div class="loading">Loading albums...</div>
-				{:else}
-					<div class="grid music-grid stagger-grid">
-						{#each artistAlbums as item}
-							<!-- svelte-ignore a11y-click-events-have-key-events -->
-							<div
-								class="album-card"
-								on:click={() => showDetail(item)}
-								on:keydown={(event) => {
-									if (event.key === 'Enter' || event.key === ' ') {
-										event.preventDefault();
-										showDetail(item);
-									}
-								}}
-								role="button"
-								tabindex="0"
-								aria-label={`View ${item.title || item.name}`}
+			{:else if searchType === 'artist'}
+				{#if selectedArtistName}
+					<div class="section-heading">
+						<div>
+							<button
+								class="text-button"
+								on:click={() => {
+									artistRequest++;
+									selectedArtistName = '';
+								}}>← Back to artists</button
 							>
-								<div class="album-cover">
-									{#if item.cover_url}
-										<img
-											src={api.imageUrl(item.cover_url)}
-											alt={item.title}
-											loading="lazy"
-											on:error={(e) => (e.target.style.display = 'none')}
-										/>
-									{/if}
-									<div class="cover-fallback">{(item.title || '?')[0]}</div>
-								</div>
-								<div class="album-info">
-									<div class="album-title">{item.title}</div>
-									{#if item.year}
-										<div class="album-year">
-											{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}
-										</div>
-									{/if}
-									{#if item.type}<div class="album-type">{item.type}</div>{/if}
-								</div>
-							</div>
-						{/each}
-					</div>
-					{#if artistAlbums.length === 0}
-						<div class="empty">No albums found</div>
-					{/if}
-				{/if}
-			{:else}
-				<h2 class="section-title">{results.length} artists found</h2>
-				<div class="artist-list">
-					{#each results as artist}
-						<!-- svelte-ignore a11y-click-events-have-key-events -->
-						<div
-							class="artist-row"
-							on:click={() => viewArtistAlbums(artist)}
-							on:keydown={(event) => {
-								if (event.key === 'Enter' || event.key === ' ') {
-									event.preventDefault();
-									viewArtistAlbums(artist);
-								}
-							}}
-							role="button"
-							tabindex="0"
+							<h2>{selectedArtistName}</h2>
+						</div>
+						<label
+							>Release type<select aria-label="Discography release type" bind:value={artistType}
+								><option value="all">All releases</option><option value="Album">Albums</option
+								><option value="EP">EPs</option><option value="Single">Singles</option></select
+							></label
 						>
-							<div class="artist-initial">{(artist.name || '?')[0]}</div>
-							<div class="artist-info">
-								<div class="artist-name">{artist.name}</div>
-								<div class="artist-meta">
-									{#if artist.type}<span>{artist.type}</span>{/if}
-									{#if artist.country}<span>{artist.country}</span>{/if}
-								</div>
-							</div>
-							<span class="arrow">→</span>
-						</div>
-					{/each}
+					</div>
+					{#if loadingArtistAlbums}<div class="empty">
+							Loading discography…
+						</div>{:else if artistError}<div class="empty" role="alert">
+							Discography unavailable: {artistError}
+						</div>{:else if !filteredArtistAlbums.length}<div class="empty">
+							No {artistType === 'all' ? 'releases' : artistType + ' releases'} found.
+						</div>{:else}<div class="music-grid">
+							{#each filteredArtistAlbums as item}<MusicAlbumCard
+									album={enrich(item)}
+									onopen={showDetail}
+								/>{/each}
+						</div>{/if}
+				{:else}<h2 class="section-title">{results.length} artists found</h2>
+					<div class="artist-list">
+						{#each results as artist}<button
+								class="artist-row"
+								on:click={() => viewArtistAlbums(artist)}
+								><span class="artist-initial">{(artist.name || '?')[0]}</span><span
+									><strong>{artist.name}</strong><small
+										>{[artist.type, artist.country].filter(Boolean).join(' · ')}</small
+									></span
+								><span class="arrow">→</span></button
+							>{/each}
+					</div>{/if}
+			{:else}<h2 class="section-title">{results.length} results</h2>
+				{#if results.length}<div class="music-grid">
+						{#each results as item}<MusicAlbumCard
+								album={enrich(item)}
+								onopen={showDetail}
+							/>{/each}
+					</div>{:else}<div class="empty">
+						No results for “{searchQuery}”. Try the artist name or a different spelling.
+					</div>{/if}{/if}
+		{:else}
+			<section class="music-intro">
+				<div>
+					<span class="eyebrow">Keep what catches your ear</span>
+					<h2>Find your next repeat.</h2>
+					<p>
+						Collect albums first. Choose what to download, and let monitored albums find their way
+						into your library.
+					</p>
 				</div>
-			{/if}
-
-			<!-- Album / Track search results -->
-		{:else if searchQuery && !loading}
-			{#if results.length > 0}
-				<h2 class="section-title">{results.length} results</h2>
-			{/if}
-			<div class="grid music-grid stagger-grid">
-				{#each displayItems as item}
-					<!-- svelte-ignore a11y-click-events-have-key-events -->
-					<div
-						class="album-card"
-						on:click={() => showDetail(item)}
-						on:keydown={(event) => {
-							if (event.key === 'Enter' || event.key === ' ') {
-								event.preventDefault();
-								showDetail(item);
-							}
-						}}
-						role="button"
-						tabindex="0"
-						aria-label={`View ${item.title || item.name}`}
+				<a href="/music?tab=library">{libraryAlbums.length} saved albums <span>↗</span></a>
+			</section>
+			{#if discoveryError}<div class="discovery-warning" role="status">
+					Discovery could not fully refresh: {discoveryError}. Search is still available.<button
+						class="text-button"
+						on:click={() => loadDiscovery()}>Try again</button
 					>
-						<div class="album-cover">
-							{#if item.cover_url || item.image_url}
-								<img
-									src={api.imageUrl(item.cover_url || item.image_url)}
-									alt={item.title || item.name}
-									loading="lazy"
-									on:error={(e) => (e.target.style.display = 'none')}
-								/>
-							{/if}
-							<div class="cover-fallback">{(item.title || item.name || '?')[0]}</div>
-							{#if item.in_library}
-								<span class="in-lib-badge">IN LIBRARY</span>
-							{/if}
-						</div>
-						<div class="album-info">
-							<div class="album-title">{item.title || item.name}</div>
-							<div class="album-artist">{item.artist || item.artist_name || ''}</div>
-							{#if item.track_name}
-								<div class="album-track">♫ {item.track_name}</div>
-							{/if}
-							{#if item.year}
-								<div class="album-year">
-									{typeof item.year === 'string' ? item.year.slice(0, 4) : item.year}
+				</div>{/if}
+			{#if loadingDiscovery}<div class="empty" role="status">Finding your next records…</div>{:else}
+				{#if enrichmentPending}<p role="status">
+						Refining recommendations from your collection…
+					</p>{/if}
+				{#each shelves as shelf}{#if shelf.items.length}<section
+							class="music-shelf"
+							aria-label={shelf.title}
+						>
+							<div class="section-heading">
+								<div>
+									<h2>{shelf.title}</h2>
+									<p>{shelf.description}</p>
 								</div>
-							{/if}
-						</div>
-					</div>
-				{/each}
-			</div>
-			{#if results.length === 0}
-				<div class="empty">No results found for "{searchQuery}"</div>
+								<span class="shelf-count">{shelf.items.length}</span>
+							</div>
+							{#if shelf.kind === 'artist'}<div class="artist-list">
+									{#each shelf.items as artist}<button
+											class="artist-row"
+											aria-label="View artist {artist.name}"
+											on:click={() => openDiscoveryArtist(artist)}
+											><span class="artist-initial">{(artist.name || '?')[0]}</span><span
+												><strong>{artist.name}</strong><small>{artist.reason}</small></span
+											><span class="arrow">→</span></button
+										>{/each}
+								</div>{:else}<div class="music-grid">
+									{#each shelf.items as item}<MusicAlbumCard
+											album={enrich(item)}
+											onopen={showDetail}
+										/>{/each}
+								</div>{/if}
+						</section>{/if}{/each}
+				{#if !shelves.some((shelf) => shelf.items.length)}<div class="empty">
+						<h2>Start with an album you love</h2>
+						<p>
+							Search an artist or album above. Save a few favorites to give discovery a starting
+							point.
+						</p>
+						{#if !discoveryError}<button on:click={() => loadDiscovery()}>Refresh discovery</button
+							>{/if}
+					</div>{/if}
 			{/if}
-
-			<!-- Trending (no search query) -->
-		{:else if !searchQuery && !loading}
-			<h2 class="section-title">Trending Albums</h2>
-			<div class="grid music-grid stagger-grid">
-				{#each trending as item}
-					<!-- svelte-ignore a11y-click-events-have-key-events -->
-					<div
-						class="album-card"
-						on:click={() => showDetail(item)}
-						on:keydown={(event) => {
-							if (event.key === 'Enter' || event.key === ' ') {
-								event.preventDefault();
-								showDetail(item);
-							}
-						}}
-						role="button"
-						tabindex="0"
-						aria-label={`View ${item.title || item.name}`}
-					>
-						<div class="album-cover">
-							{#if item.cover_url || item.image_url}
-								<img
-									src={api.imageUrl(item.cover_url || item.image_url)}
-									alt={item.title || item.name}
-									loading="lazy"
-									on:error={(e) => (e.target.style.display = 'none')}
-								/>
-							{/if}
-							<div class="cover-fallback">{(item.title || item.name || '?')[0]}</div>
-						</div>
-						<div class="album-info">
-							<div class="album-title">{item.title || item.name}</div>
-							<div class="album-artist">{item.artist || ''}</div>
-						</div>
-					</div>
-				{/each}
-			</div>
 		{/if}
 	{:else}
-		<!-- Library tab -->
 		<div class="library-controls">
 			<div class="view-toggle">
 				<button class:active={libraryView === 'albums'} on:click={() => (libraryView = 'albums')}
 					>Albums</button
-				>
-				<button class:active={libraryView === 'artists'} on:click={() => (libraryView = 'artists')}
+				><button class:active={libraryView === 'artists'} on:click={() => (libraryView = 'artists')}
 					>Artists</button
 				>
 			</div>
-			{#if libraryView === 'albums'}
-				<div class="filter-bar">
-					{#each ['all', 'wanted', 'available', 'downloading'] as f}
-						<button
-							class="filter-btn"
-							class:active={libraryFilter === f}
-							on:click={() => setFilter(f)}
-						>
-							{f[0].toUpperCase() + f.slice(1)}
-						</button>
-					{/each}
-				</div>
-			{/if}
-		</div>
-
-		{#if loadingLibrary}
-			<div class="loading">Loading library...</div>
-		{:else if libraryError}
-			<div class="empty" role="alert">
-				Music library unavailable: {libraryError}
-				<button class="link-btn" on:click={loadLibrary}>Try again</button>
-			</div>
-		{:else if libraryView === 'albums'}
-			{#if libraryArtist}<div class="breadcrumb">
-					<a class="link-btn" href="/music?tab=library">← All artists</a><span
-						>{libraryArtists.find((artist) => artist.mbid === libraryArtist)?.name ||
-							'Artist albums'}</span
-					>
+			{#if libraryView === 'albums'}<div class="filter-bar">
+					{#each [['all', 'All'], ['saved', 'Saved'], ['available', 'Available'], ['downloading', 'Downloading'], ['attention', 'Needs attention'], ['monitored', 'Monitored'], ['favorites', 'Favorites']] as [value, label]}<button
+							class:active={libraryFilter === value}
+							on:click={() => (libraryFilter = value)}>{label}</button
+						>{/each}
 				</div>{/if}
-			{#if visibleLibraryAlbums.length === 0}
-				<div class="empty">
-					No albums in library{libraryFilter !== 'all' ? ` with status "${libraryFilter}"` : ''}
-				</div>
-			{:else}
-				<div class="grid music-grid stagger-grid">
-					{#each visibleLibraryAlbums as album}
-						<a href="/music/{album.id}" class="album-card">
-							<div class="album-cover">
-								{#if album.release_group_id}
-									<img
-										src={api.musicCoverUrl(album.release_group_id)}
-										alt={album.title}
-										loading="lazy"
-										on:error={(e) => (e.target.style.display = 'none')}
-									/>
-								{/if}
-								{#if album.image_url}
-									<img
-										src={api.imageUrl(album.image_url)}
-										alt={album.title}
-										loading="lazy"
-										class="fallback-img"
-									/>
-								{/if}
-								<div class="cover-fallback">{(album.title || '?')[0]}</div>
-								<span class="status-badge status-{album.status}">{album.status}</span>
-							</div>
-							<div class="album-info">
-								<div class="album-title">{album.title}</div>
-								<div class="album-artist">{album.artist_name}</div>
-								{#if album.year}
-									<div class="album-year">{album.year}</div>
-								{/if}
-							</div>
-						</a>
-					{/each}
-				</div>
-			{/if}
-		{:else}
-			<!-- Artists view -->
-			{#if libraryArtists.length === 0}
-				<div class="empty">No artists in library</div>
-			{:else}
-				<div class="artist-list">
-					{#each libraryArtists as artist}
-						<a
-							href="/music?tab=library&artist={encodeURIComponent(artist.mbid)}"
-							class="artist-row"
-						>
-							<div class="artist-initial">{(artist.name || '?')[0]}</div>
-							<div class="artist-info">
-								<div class="artist-name">{artist.name}</div>
-								<div class="artist-meta">
-									<span>{artist.album_count} album{artist.album_count !== 1 ? 's' : ''}</span>
-									<span>{artist.available_count} available</span>
-								</div>
-							</div>
-							<span class="arrow">→</span>
-						</a>
-					{/each}
-				</div>
-			{/if}
-		{/if}
+		</div>
+		{#if loadingLibrary}<div class="empty">Loading library…</div>{:else if libraryError}<div
+				class="empty"
+				role="alert"
+			>
+				Music library unavailable: {libraryError}<button on:click={() => loadLibrary()}
+					>Try again</button
+				>
+			</div>{:else if libraryView === 'albums'}
+			{#if libraryArtist}<div class="section-heading">
+					<a href="/music?tab=library">← All artists</a>
+					<h2>
+						{libraryArtists.find((artist) => artist.mbid === libraryArtist)?.name ||
+							'Artist albums'}
+					</h2>
+				</div>{/if}
+			{#if visibleLibraryAlbums.length}<div class="music-grid">
+					{#each visibleLibraryAlbums as album}<MusicAlbumCard
+							{album}
+							href="/music/{album.id}"
+						/>{/each}
+				</div>{:else}<div class="empty">
+					<h2>
+						{libraryFilter === 'all' ? 'Your collection starts here' : 'No albums in this view'}
+					</h2>
+					<p>Saved albums stay here even when you have not downloaded them.</p>
+					<a href="/music">Discover music →</a>
+				</div>{/if}
+		{:else if !libraryArtists.length}<div class="empty">No artists in library</div>{:else}<div
+				class="artist-list"
+			>
+				{#each libraryArtists as artist}<a
+						href="/music?tab=library&artist={encodeURIComponent(artist.mbid)}"
+						class="artist-row"
+						><span class="artist-initial">{(artist.name || '?')[0]}</span><span
+							><strong>{artist.name}</strong><small
+								>{artist.album_count} albums · {artist.available_count} available</small
+							></span
+						><span class="arrow">→</span></a
+					>{/each}
+			</div>{/if}
 	{/if}
 </div>
-
-{#if selectedItem}
-	<!-- svelte-ignore a11y-click-events-have-key-events -->
-	<div class="modal-overlay" on:click={() => (selectedItem = null)} role="presentation">
-		<div class="modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
-			<button class="modal-close" on:click={() => (selectedItem = null)}>✕</button>
-			<MusicDetail
-				item={selectedItem}
-				{profiles}
-				on:added={handleAdded}
-				on:error={(e) => notify(e.detail, 'error')}
-			/>
+{#if selectedItem}<div class="modal-overlay" on:click={closeDetail} role="presentation">
+		<div
+			class="modal"
+			use:modalAccessibility
+			on:click|stopPropagation
+			on:keydown|stopPropagation
+			role="dialog"
+			aria-modal="true"
+			aria-label="Album details"
+		>
+			<button class="modal-close" aria-label="Close album details" on:click={closeDetail}>✕</button
+			>{#key releaseGroupId(selectedItem) || selectedItem.id}<MusicDetail
+					item={selectedItem}
+					{profiles}
+					on:added={handleAdded}
+					on:updated={() => loadLibrary(true)}
+					on:error={(e) => notify(e.detail, 'error')}
+				/>{/key}
 		</div>
-	</div>
-{/if}
+	</div>{/if}
 
 <style>
-	/* Page header */
+	.music-page {
+		max-width: 1440px;
+	}
+	.page-header,
+	.section-heading,
+	.library-controls,
+	.search-row {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		align-items: center;
+		flex-wrap: wrap;
+	}
 	.page-header {
+		margin-bottom: 1.5rem;
+	}
+	h1 {
+		font: 800 2.5rem var(--font-display);
+		line-height: 1;
+		margin-top: 0.25rem;
+	}
+	h2 {
+		font: 700 1.5rem var(--font-display);
+		margin: 0;
+	}
+	.eyebrow {
+		font-size: 0.65rem;
+		text-transform: uppercase;
+		letter-spacing: 0.16em;
+		color: var(--text-muted);
+	}
+	button,
+	select {
+		color: var(--text-primary);
+		background: var(--glass-bg);
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-sm);
+		font: inherit;
+		padding: 0.6rem 0.8rem;
+		cursor: pointer;
+	}
+	button:focus-visible,
+	select:focus-visible,
+	a:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 3px;
+	}
+	.tab-selector,
+	.view-toggle,
+	.search-type-selector,
+	.filter-bar {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		font-size: 0.8rem;
+	}
+	button.active {
+		color: var(--text-inverse);
+		background: var(--accent);
+		border-color: var(--accent);
+	}
+	.search-row {
+		margin-bottom: 1.4rem;
+	}
+	.search-bar-wrap {
+		flex: 1;
+		min-width: min(100%, 260px);
+	}
+	.music-intro {
+		padding: 2rem;
+		border: 1px solid var(--glass-border);
+		border-radius: var(--radius-lg);
+		background: linear-gradient(115deg, var(--accent-subtle), var(--bg-elevated));
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: 1.25rem;
+		gap: 2rem;
+		margin-bottom: 2rem;
 	}
-
-	h1 {
-		font-family: var(--font-display);
-		font-size: 1.75rem;
-		font-weight: 800;
-		letter-spacing: -0.02em;
+	.music-intro h2 {
+		font-size: clamp(2.3rem, 5vw, 4rem);
+		margin: 0.4rem 0;
+		line-height: 1;
 	}
-
-	/* Tab selector & view toggle — glass panels */
-	.tab-selector,
-	.view-toggle {
-		display: flex;
-		gap: 0.25rem;
-		background: var(--glass-bg);
-		border: 1px solid var(--glass-border);
-		border-radius: var(--radius-md);
-		padding: 3px;
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-	}
-
-	.tab-selector button,
-	.view-toggle button {
-		padding: 0.4rem 1rem;
-		border: none;
-		background: transparent;
+	.music-intro p {
+		font-size: 0.9rem;
 		color: var(--text-secondary);
-		border-radius: calc(var(--radius-md) - 2px);
-		font-size: 0.85rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.2s ease;
+		line-height: 1.7;
+		max-width: 580px;
+		margin: 0.8rem 0 0;
 	}
-
-	.tab-selector button.active,
-	.view-toggle button.active {
-		background: var(--accent);
-		color: var(--text-inverse);
-		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
-	}
-
-	/* Search row */
-	.search-row {
-		display: flex;
-		gap: 0.75rem;
-		align-items: center;
-		margin-bottom: 1.75rem;
-	}
-
-	.search-type-selector {
-		display: flex;
-		gap: 0.25rem;
-		background: var(--glass-bg);
+	.music-intro a {
+		white-space: nowrap;
 		border: 1px solid var(--glass-border);
-		border-radius: var(--radius-md);
-		padding: 3px;
-		flex-shrink: 0;
-		backdrop-filter: blur(12px);
-		-webkit-backdrop-filter: blur(12px);
-	}
-
-	.search-type-selector button {
-		padding: 0.35rem 0.75rem;
-		border: none;
-		background: transparent;
-		color: var(--text-secondary);
-		border-radius: calc(var(--radius-md) - 2px);
+		border-radius: var(--radius-sm);
+		padding: 1rem;
 		font-size: 0.8rem;
-		font-weight: 500;
-		cursor: pointer;
-		transition: all 0.2s ease;
 	}
-
-	.search-type-selector button.active {
-		background: var(--accent);
-		color: var(--text-inverse);
-		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
-	}
-
-	.search-bar-wrap {
-		flex: 1;
-	}
-
-	/* Section title — editorial style */
-	.section-title {
-		font-family: var(--font-display);
-		font-size: 1.05rem;
-		font-weight: 700;
-		letter-spacing: -0.02em;
-		color: var(--text-secondary);
-		margin: 1.25rem 0 0.75rem;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		font-size: 0.7rem;
-		opacity: 0.7;
-	}
-
-	/* Breadcrumb */
-	.breadcrumb {
-		margin-bottom: 0.5rem;
-	}
-
-	.link-btn {
-		background: none;
-		border: none;
+	.music-intro a span {
+		margin-left: 0.8rem;
 		color: var(--accent);
-		cursor: pointer;
-		font-size: 0.85rem;
-		padding: 0;
-		margin-bottom: 0.25rem;
-		transition: opacity 0.2s ease;
 	}
-
-	.link-btn:hover {
-		text-decoration: underline;
-		opacity: 0.8;
+	.music-shelf {
+		margin: 2rem 0;
 	}
-
-	/* Music grid */
+	.section-heading {
+		margin: 1.25rem 0;
+	}
+	.section-heading p {
+		margin: 0.4rem 0 0;
+		color: var(--text-muted);
+		font-size: 0.8rem;
+	}
+	.section-heading label {
+		display: grid;
+		gap: 0.35rem;
+		font-size: 0.75rem;
+	}
+	.section-title {
+		margin: 1rem 0;
+	}
+	.shelf-count {
+		color: var(--text-muted);
+		font: 700 1.5rem var(--font-display);
+	}
 	.music-grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-		gap: 1.25rem;
+		grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
+		gap: 1rem;
 	}
-
-	/* Album card — glass card */
-	.album-card {
-		background: var(--glass-bg);
-		border: 1px solid var(--glass-border);
-		border-radius: var(--radius-md);
-		cursor: pointer;
-		transition:
-			transform 0.25s ease,
-			box-shadow 0.25s ease;
-		text-decoration: none;
-		color: inherit;
-		overflow: hidden;
-	}
-
-	.album-card:hover {
-		transform: translateY(-2px);
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-	}
-
-	.album-cover {
-		position: relative;
-		aspect-ratio: 1/1;
-		overflow: hidden;
-		background: var(--bg-elevated);
-	}
-
-	.album-cover img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-		position: absolute;
-		top: 0;
-		left: 0;
-	}
-
-	.album-cover .fallback-img {
-		z-index: 0;
-	}
-
-	.cover-fallback {
-		width: 100%;
-		height: 100%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: 2rem;
-		font-weight: 700;
-		color: var(--text-muted);
-		background: linear-gradient(135deg, var(--bg-elevated), var(--bg-surface));
-	}
-
-	.in-lib-badge {
-		position: absolute;
-		top: 6px;
-		right: 6px;
-		background: var(--accent);
-		color: var(--text-inverse);
-		font-size: 0.6rem;
-		font-weight: 700;
-		padding: 2px 6px;
-		border-radius: 3px;
-	}
-
-	.status-badge {
-		position: absolute;
-		bottom: 6px;
-		left: 6px;
-		font-size: 0.6rem;
-		font-weight: 700;
-		padding: 2px 6px;
-		border-radius: 3px;
-		text-transform: uppercase;
-	}
-
-	.status-wanted {
-		background: var(--gold);
-		color: #000;
-	}
-	.status-available {
-		background: var(--success);
-		color: #fff;
-	}
-	.status-downloading {
-		background: var(--accent);
-		color: var(--text-inverse);
-	}
-
-	.album-info {
-		padding: 0.5rem 0.6rem;
-	}
-
-	.album-title {
-		font-size: 0.85rem;
-		font-weight: 600;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.album-artist {
-		font-size: 0.75rem;
-		color: var(--text-secondary);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.album-track {
-		font-size: 0.7rem;
-		color: var(--accent);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.album-year {
-		font-size: 0.7rem;
-		color: var(--text-muted);
-	}
-
-	.album-type {
-		font-size: 0.65rem;
-		color: var(--text-muted);
-		text-transform: uppercase;
-	}
-
-	/* Artist list */
 	.artist-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.35rem;
+		display: grid;
+		gap: 0.7rem;
 	}
-
 	.artist-row {
 		display: flex;
 		align-items: center;
 		gap: 1rem;
-		padding: 0.75rem;
-		background: var(--glass-bg);
+		padding: 1rem;
+		text-align: left;
 		border: 1px solid var(--glass-border);
 		border-radius: var(--radius-md);
-		cursor: pointer;
-		text-decoration: none;
-		color: inherit;
-		transition:
-			transform 0.2s ease,
-			box-shadow 0.2s ease,
-			background 0.2s ease;
+		background: var(--glass-bg);
 	}
-
-	.artist-row:hover {
-		background: var(--bg-hover);
-		transform: translateY(-1px);
-		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-	}
-
 	.artist-initial {
-		width: 44px;
-		height: 44px;
-		border-radius: 50%;
-		background: var(--bg-elevated);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		font-size: 1.2rem;
-		font-weight: 700;
-		color: var(--text-muted);
-		flex-shrink: 0;
+		font: 700 1.5rem var(--font-display);
+		color: var(--accent);
+		width: 2rem;
 	}
-
-	.artist-info {
-		flex: 1;
-		min-width: 0;
-	}
-	.artist-name {
-		font-weight: 600;
-		font-size: 0.9rem;
-	}
-	.artist-meta {
-		display: flex;
-		gap: 0.75rem;
+	.artist-row small {
+		display: block;
+		margin-top: 0.2rem;
 		font-size: 0.75rem;
 		color: var(--text-muted);
 	}
 	.arrow {
+		margin-left: auto;
 		color: var(--text-muted);
-		font-size: 1.2rem;
-		transition: transform 0.2s ease;
 	}
-	.artist-row:hover .arrow {
-		transform: translateX(2px);
-	}
-
-	/* Library controls */
 	.library-controls {
-		display: flex;
-		align-items: center;
-		gap: 1rem;
-		margin-bottom: 1rem;
-		flex-wrap: wrap;
+		margin-bottom: 1.5rem;
 	}
-
-	.filter-bar {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.5rem;
-	}
-
-	.filter-btn {
-		padding: 0.35rem 0.75rem;
-		border: 1px solid var(--glass-border);
-		background: var(--glass-bg);
-		color: var(--text-secondary);
-		border-radius: 20px;
-		font-size: 0.8rem;
-		cursor: pointer;
-		transition: all 0.2s ease;
-	}
-
-	.filter-btn.active {
-		background: var(--accent);
-		color: var(--text-inverse);
-		border-color: var(--accent);
-		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
-	}
-
-	/* Loading & empty states */
-	.loading {
-		text-align: center;
-		color: var(--text-muted);
-		padding: 3rem;
-	}
-
 	.empty {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
 		text-align: center;
-		color: var(--text-muted);
-		padding: 3rem;
-		gap: 0.75rem;
+		padding: 2.5rem 1rem;
+		color: var(--text-secondary);
+		line-height: 1.7;
+		border: 1px dashed var(--glass-border);
+		border-radius: var(--radius-md);
 	}
-
-	.empty::before {
-		content: '\1F3B5';
-		font-size: 2.5rem;
-		opacity: 0.35;
+	.empty h2 {
+		color: var(--text-primary);
 	}
-
-	/* Modal — backdrop blur + scaleIn animation */
-	@keyframes scaleIn {
-		from {
-			opacity: 0;
-			transform: scale(0.95);
-		}
-		to {
-			opacity: 1;
-			transform: scale(1);
-		}
+	.empty button,
+	.empty a {
+		display: inline-block;
+		margin: 0.7rem;
 	}
-
+	.discovery-warning {
+		padding: 1rem;
+		font-size: 0.8rem;
+		line-height: 1.6;
+		border: 1px solid var(--glass-border);
+	}
+	.text-button {
+		border: 0;
+		color: var(--accent);
+		background: transparent;
+		padding: 0.3rem;
+	}
 	.modal-overlay {
 		position: fixed;
 		inset: 0;
-		background: rgba(0, 0, 0, 0.5);
-		backdrop-filter: blur(8px);
-		-webkit-backdrop-filter: blur(8px);
-		z-index: 200;
-		padding: 2rem;
-		overflow-y: auto;
+		z-index: 1000;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 1rem;
+		background: rgba(0, 0, 0, 0.78);
+		backdrop-filter: blur(6px);
 	}
-
 	.modal {
+		max-width: 840px;
 		width: 100%;
-		max-width: 700px;
-		margin: 0 auto;
+		max-height: calc(100dvh - 2rem);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		background: var(--bg-primary);
+		border-radius: var(--radius-xl);
 		position: relative;
-		border-radius: var(--radius-md);
-		animation: scaleIn 0.25s ease forwards;
 	}
-
 	.modal-close {
 		position: absolute;
-		top: 12px;
-		right: 12px;
-		background: var(--glass-bg);
-		border: 1px solid var(--glass-border);
-		color: var(--text-primary);
-		width: 32px;
-		height: 32px;
-		border-radius: 50%;
-		font-size: 1rem;
-		z-index: 10;
-		cursor: pointer;
-		transition: background 0.2s ease;
+		right: 0.7rem;
+		top: 0.7rem;
+		z-index: 2;
 	}
-
-	.modal-close:hover {
-		background: var(--bg-hover);
-	}
-
-	@media (max-width: 768px) {
-		.page-header {
+	@media (max-width: 700px) {
+		.music-intro {
+			padding: 1.25rem;
+			align-items: flex-start;
 			flex-direction: column;
-			gap: 0.75rem;
-			align-items: stretch;
+			gap: 1rem;
 		}
-
-		.search-row {
-			flex-direction: column;
-		}
-
 		.music-grid {
-			grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 0.7rem;
 		}
-
-		.library-controls {
-			flex-direction: column;
+		.search-row {
 			align-items: stretch;
+		}
+		.search-bar-wrap {
+			width: 100%;
+		}
+		.filter-bar {
+			gap: 0.3rem;
+		}
+		.filter-bar button {
+			padding: 0.5rem 0.6rem;
 		}
 	}
 </style>

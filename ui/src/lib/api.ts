@@ -96,17 +96,35 @@ export const api = {
 		request('DELETE', `/ratings/${tmdbId}?type=${type}`),
 
 	// Music
-	musicSearch: (q: string, type = 'album') =>
-		request('GET', `/music/search?q=${encodeURIComponent(q)}&type=${type}`),
+	musicSearch: (q: string, type = 'album', local = false) =>
+		request(
+			'GET',
+			`/music/search?q=${encodeURIComponent(q)}&type=${type}${local ? '&local=true' : ''}`
+		),
+	musicResolve: (artist: string, title: string, year = '') =>
+		request(
+			'GET',
+			`/music/resolve?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}${year ? `&year=${encodeURIComponent(year)}` : ''}`
+		),
 	musicTrending: (page = 1) => request('GET', `/music/trending?page=${page}`),
+	musicDiscover: () => request('GET', '/music/discover'),
 	musicArtist: (mbid: string) => request('GET', `/music/artist/${mbid}`),
-	musicAlbum: (rgid: string) => request('GET', `/music/album/${rgid}`),
+	musicAlbum: (rgid: string, releaseId = '') =>
+		request(
+			'GET',
+			`/music/album/${rgid}${releaseId ? `?release_id=${encodeURIComponent(releaseId)}` : ''}`
+		),
 	addMusicToLibrary: (data: any) => request('POST', '/music/library', data),
 	getMusicLibrary: (status = 'all') => request('GET', `/music/library?status=${status}`),
 	getMusicArtists: () => request('GET', '/music/library/artists'),
 	getMusicLibraryItem: (id: number) => request('GET', `/music/library/${id}`),
 	deleteMusicLibraryItem: (id: number) => request('DELETE', `/music/library/${id}`),
 	searchMusicAlbum: (id: number) => request('POST', `/music/library/${id}/search`),
+	downloadMusicAlbum: (id: number) => request('POST', `/music/library/${id}/download`),
+	monitorMusicAlbum: (id: number, monitored: boolean) =>
+		request('PATCH', `/music/library/${id}/monitor`, { monitored }),
+	favoriteMusicAlbum: (id: number, favorite: boolean) =>
+		request('PATCH', `/music/library/${id}/favorite`, { favorite }),
 	rateMusicAlbum: (id: number, data: { rating: number; comment: string }) =>
 		request('PUT', `/music/library/${id}/rate`, data),
 	getMusicReleases: (id: number) => request('GET', `/music/library/${id}/releases`),

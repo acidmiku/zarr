@@ -94,7 +94,7 @@ func main() {
 	mapping := metadata.NewMapping(clients.Proxy)
 
 	// Initialize music clients
-	musicbrainzClient := metadata.NewMusicBrainzClient(clients.Proxy)
+	musicbrainzClient := metadata.NewMusicBrainzClient(clients.Proxy, db)
 	coverartClient := metadata.NewCoverArtClient(clients.Proxy, configDir)
 	slog.Info("MusicBrainz and CoverArt clients initialized")
 

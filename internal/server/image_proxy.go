@@ -165,12 +165,25 @@ func (c *imageCache) fetchOrJoin(ctx context.Context, client *http.Client, url s
 
 	// We own the fetch. Do it synchronously so the caller can directly use the
 	// result; other waiters block on entry.done.
-	c.doFetch(ctx, client, url, entry)
+	// The caller's earlier disk check may predate another completed fetch. Once
+	// ownership is established, recheck before opening another upstream request.
+	if cached := c.get(url); cached != nil {
+		if data, err := os.ReadFile(cached.path); err == nil {
+			entry.data, entry.ct, entry.status = data, cached.contentType, http.StatusOK
+		}
+	}
+	if entry.status != http.StatusOK {
+		if c.isNegative(url) {
+			entry.status, entry.err = http.StatusNotFound, fmt.Errorf("image is temporarily unavailable")
+		} else {
+			c.doFetch(ctx, client, url, entry)
+		}
+	}
 
 	c.inflightMu.Lock()
 	delete(c.inflight, url)
-	c.inflightMu.Unlock()
 	close(entry.done)
+	c.inflightMu.Unlock()
 	return entry
 }
 
@@ -262,6 +275,7 @@ var allowedImagePrefixes = []string{
 	"https://coverartarchive.org/",
 	"https://archive.org/",
 	"https://lastfm.freetls.fastly.net/",
+	"https://lastfm-img.freetls.fastly.net/",
 	"https://lastfm-img2.akamaized.net/",
 }
 
@@ -276,7 +290,7 @@ func allowedImageURL(raw string) bool {
 		}
 	}
 	// Cover Art Archive redirects image downloads to Internet Archive storage.
-	return strings.HasSuffix(u.Hostname(), ".archive.org")
+	return strings.HasSuffix(u.Hostname(), ".archive.org") || u.Hostname() == "dzcdn.net" || strings.HasSuffix(u.Hostname(), ".dzcdn.net") || u.Hostname() == "mzstatic.com" || strings.HasSuffix(u.Hostname(), ".mzstatic.com")
 }
 
 // handleImageProxy proxies external images through the backend to avoid CORS issues,

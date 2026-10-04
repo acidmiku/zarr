@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"mediaforge/internal/grabber"
+	"mediaforge/internal/music"
 	"net/http"
 	"os"
 )
@@ -294,6 +295,7 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 				err = s.processor.Process(id, path.String)
 			}
 			if err != nil {
+				s.db.Exec(`UPDATE downloads SET error_message=? WHERE id=?`, "Import failed: "+err.Error(), id)
 				writeError(w, 422, "Import failed: "+err.Error())
 				return
 			}
@@ -326,6 +328,13 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if albumID.Valid {
 		s.db.Exec(`UPDATE albums SET status='wanted' WHERE id=? AND status!='available'`, albumID.Int64)
+		acquisition, requestErr := music.Request(s.db, int(albumID.Int64), false)
+		if requestErr != nil {
+			writeError(w, 500, "could not save music retry")
+			return
+		}
+		writeJSON(w, 202, map[string]any{"status": "retrying", "acquisition": acquisition})
+		return
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "retrying"})
@@ -357,6 +366,7 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 	} else if mediaItemID.Valid {
 		s.db.Exec(`UPDATE media_items SET status='wanted' WHERE id=? AND status!='available' AND NOT EXISTS (SELECT 1 FROM downloads WHERE media_item_id=? AND id!=? AND status IN ('queued','downloading','extracting'))`, mediaItemID.Int64, mediaItemID.Int64, id)
 	} else if albumID.Valid {
+		music.Pause(s.db, int(albumID.Int64))
 		s.db.Exec(`UPDATE albums SET status='wanted' WHERE id=? AND status!='available' AND NOT EXISTS (SELECT 1 FROM downloads WHERE album_id=? AND id!=? AND status IN ('queued','downloading','extracting'))`, albumID.Int64, albumID.Int64, id)
 	}
 

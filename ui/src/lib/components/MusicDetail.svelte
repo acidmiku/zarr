@@ -1,134 +1,222 @@
 <script>
 	import { createEventDispatcher, onMount } from 'svelte';
 	import { api } from '$lib/api';
-
+	import { musicArtwork, releaseGroupId } from '$lib/music';
+	import Artwork from './Artwork.svelte';
+	import MusicAcquisition from './MusicAcquisition.svelte';
 	export let item = null;
 	export let profiles = [];
-
 	const dispatch = createEventDispatcher();
-
-	let selectedProfile = (() => {
-		const match = profiles.find(p => p.profile_type === 'music');
-		return match?.id || 0;
-	})();
+	let selectedProfile = 0;
 	let adding = false;
+	let monitored = false;
 	let albumDetail = null;
 	let loadingDetail = false;
-
-	onMount(async () => {
-		// If we have a MusicBrainz ID, fetch track details
-		const rgid = item?.release_group_id || item?.id || item?.mbid;
-		if (rgid) {
-			loadingDetail = true;
-			try {
-				albumDetail = await api.musicAlbum(rgid);
-			} catch {}
-			loadingDetail = false;
-		}
-	});
-
-	$: coverUrl = item?.cover_url || item?.image_url
-		? api.imageUrl(item.cover_url || item.image_url)
-		: '';
-
+	let detailError = '';
+	let actionError = '';
+	let savedAlbum = null;
+	let selectedEdition = '';
+	let detailRequest = 0;
+	let disposed = false;
 	$: artistName = item?.artist || item?.artist_name || '';
 	$: albumTitle = item?.title || item?.name || '';
-	$: year = item?.year ? (typeof item.year === 'string' ? item.year.slice(0, 4) : item.year) : '';
-
-	$: trackList = albumDetail?.release?.media?.flatMap(m =>
-		(m.tracks || []).map(t => ({
-			...t,
-			disc: m.position
-		}))
-	) || [];
-
-	async function addToLibrary() {
-		if (adding) return;
-		adding = true;
+	$: year = String(item?.year || '').slice(0, 4);
+	$: trackList =
+		albumDetail?.release?.media?.flatMap((m) =>
+			(m.tracks || []).map((t) => ({ ...t, disc: m.position }))
+		) || [];
+	$: editions = Array.isArray(albumDetail?.editions) ? albumDetail.editions : [];
+	$: canSave = !adding && !loadingDetail && !detailError && !!albumDetail?.release?.id;
+	onMount(() => {
+		loadDetail();
+		if (item?.in_library && item?.library_id) {
+			api
+				.getMusicLibraryItem(item.library_id)
+				.then((data) => {
+					if (!disposed) savedAlbum = data.album;
+				})
+				.catch((e) => {
+					if (!disposed) actionError = e.message;
+				});
+		}
+		return () => {
+			disposed = true;
+			detailRequest++;
+		};
+	});
+	async function loadDetail(edition = '') {
+		if (edition) selectedEdition = edition;
+		const rgid = releaseGroupId(item);
+		if (!rgid) {
+			detailError = 'This album could not be identified in the catalog.';
+			return;
+		}
+		const request = ++detailRequest;
+		loadingDetail = true;
+		detailError = '';
 		try {
-			const rgid = item?.release_group_id || item?.id || item?.mbid;
+			const data = await api.musicAlbum(rgid, edition);
+			if (disposed || request !== detailRequest) return;
+			if (!data.release?.id) throw new Error('No complete edition is available.');
+			if (edition && data.release.id !== edition)
+				throw new Error('The selected edition could not be loaded.');
+			albumDetail = { ...data, editions: data.editions || albumDetail?.editions || [] };
+			selectedEdition = data.release?.id || edition;
+		} catch (e) {
+			if (!disposed && request === detailRequest)
+				detailError = `Track details are unavailable: ${e.message}`;
+		} finally {
+			if (request === detailRequest) loadingDetail = false;
+		}
+	}
+	async function save(downloadNow = false) {
+		if (!canSave) return;
+		adding = true;
+		actionError = '';
+		try {
 			const payload = {
-				release_group_id: rgid,
+				release_group_id: releaseGroupId(item),
 				artist_mbid: item?.artist_id || item?.artist_mbid || '',
 				artist_name: artistName,
 				album_title: albumTitle,
 				year: parseInt(year) || 0,
 				album_type: item?.type || 'Album',
 				quality_profile_id: selectedProfile,
-				image_url: item?.cover_url || item?.image_url || ''
+				image_url: item?.cover_url || item?.image_url || '',
+				monitored,
+				download_now: downloadNow
 			};
-
-			await api.addMusicToLibrary(payload);
-			dispatch('added');
+			if (selectedEdition) payload.release_id = selectedEdition;
+			const result = await api.addMusicToLibrary(payload);
+			if (disposed) return;
+			if (!result?.id)
+				throw new Error(
+					'Album was saved, but its library ID was not returned. Refresh the library before trying again.'
+				);
+			savedAlbum = {
+				...item,
+				id: result.id,
+				monitored,
+				acquisition: { status: downloadNow ? 'queued' : 'saved' }
+			};
+			try {
+				const data = await api.getMusicLibraryItem(result.id);
+				if (!disposed && data.album) savedAlbum = data.album;
+			} catch {
+				actionError = 'Album saved. Status could not refresh yet; open the library to check it.';
+			}
+			dispatch('added', { id: result.id, downloadNow, album: savedAlbum });
 		} catch (e) {
-			dispatch('error', e.message);
+			if (!disposed) actionError = e.message;
+		} finally {
+			adding = false;
 		}
-		adding = false;
 	}
-
+	function editionLabel(edition) {
+		const tracks = (edition.media || []).reduce(
+			(sum, disc) => sum + (disc['track-count'] || disc.track_count || disc.tracks?.length || 0),
+			0
+		);
+		return (
+			[
+				edition.title,
+				edition.date || edition.country,
+				edition.country && edition.date ? edition.country : '',
+				tracks ? `${tracks} tracks` : ''
+			]
+				.filter(Boolean)
+				.join(' · ') || edition.id
+		);
+	}
 	function formatDuration(ms) {
 		if (!ms) return '';
-		const s = Math.floor(ms / 1000);
-		const m = Math.floor(s / 60);
-		const sec = s % 60;
-		return `${m}:${String(sec).padStart(2, '0')}`;
+		const seconds = Math.floor(ms / 1000);
+		return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 	}
 </script>
 
-<div class="detail" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
+<div
+	class="detail"
+	on:click|stopPropagation
+	on:keydown|stopPropagation
+	role="dialog"
+	aria-label={albumTitle}
+>
 	<div class="detail-content">
 		<div class="detail-header">
-			{#if coverUrl}
-				<img class="detail-cover" src={coverUrl} alt={albumTitle}
-					on:error={(e) => e.target.style.display = 'none'} />
-			{:else}
-				<div class="detail-cover cover-fallback">{(albumTitle || '?')[0]}</div>
-			{/if}
+			<div class="detail-cover"><Artwork src={musicArtwork(item)} title={albumTitle} eager /></div>
 			<div class="detail-info">
 				<h2>{albumTitle}</h2>
 				<div class="meta-row">
-					{#if artistName}<span class="artist">{artistName}</span>{/if}
-					{#if year}<span class="year">{year}</span>{/if}
-					{#if item?.type}<span class="type-tag">{item.type}</span>{/if}
-					{#if item?.in_library}<span class="lib-tag">IN LIBRARY</span>{/if}
+					<span class="artist">{artistName}</span>{#if year}<span class="year">{year}</span
+						>{/if}{#if item?.type}<span class="type-tag">{item.type}</span>{/if}
 				</div>
-
-				{#if trackList.length > 0}
-					<div class="track-count">{trackList.length} tracks</div>
+				{#if item?.reason}<p class="album-reason">{item.reason}</p>{/if}
+				{#if savedAlbum}
+					<MusicAcquisition
+						bind:album={savedAlbum}
+						on:updated={(e) => dispatch('updated', e.detail)}
+					/>
+					<a href="/music/{savedAlbum.id}" class="btn btn-secondary">View in Library</a>
+				{:else if item?.in_library}
+					<p>Saved in your library.</p>
+					{#if item.library_id}<a href="/music/{item.library_id}" class="btn btn-secondary"
+							>View in Library</a
+						>{/if}
+				{:else}
+					<p class="save-hint">Save albums you want to return to. Download when you are ready.</p>
+					<label class="profile-label"
+						>Download quality<select bind:value={selectedProfile} disabled={adding}
+							><option value={0}>Default music profile</option
+							>{#each profiles.filter((p) => p.profile_type === 'music') as p}<option value={p.id}
+									>{p.name}</option
+								>{/each}</select
+						></label
+					>
+					<label class="monitor-label"
+						><input type="checkbox" bind:checked={monitored} disabled={adding} /> Monitor album</label
+					>
+					<p class="save-hint">
+						Monitoring automatically searches for a matching release. Leave it off to only save.
+					</p>
+					<div class="actions">
+						<button class="btn btn-primary" on:click={() => save(false)} disabled={!canSave}
+							>{adding ? 'Saving…' : 'Save to library'}</button
+						><button class="btn btn-secondary" on:click={() => save(true)} disabled={!canSave}
+							>Download now</button
+						>
+					</div>
 				{/if}
-
-				<div class="actions">
-					{#if !item?.in_library}
-						<div class="add-row">
-							<select bind:value={selectedProfile}>
-								{#each profiles.filter(p => p.profile_type === 'music') as p}
-									<option value={p.id}>{p.name}</option>
-								{/each}
-							</select>
-							<button class="btn btn-primary" on:click={addToLibrary} disabled={adding}>
-								{adding ? 'Adding...' : 'Add to Library'}
-							</button>
-						</div>
-					{:else}
-						<a href="/music/{item.library_id}" class="btn btn-secondary">View in Library</a>
-					{/if}
-				</div>
+				{#if actionError}<p class="action-error" role="alert">{actionError}</p>{/if}
 			</div>
 		</div>
-
-		{#if loadingDetail}
-			<div class="loading-tracks">Loading tracks...</div>
-		{:else if trackList.length > 0}
+		{#if editions.length > 1 && !savedAlbum && !item?.in_library}<label class="edition-label"
+				>Edition<select
+					aria-label="Edition"
+					value={selectedEdition}
+					disabled={loadingDetail || adding}
+					on:change={(e) => loadDetail(e.currentTarget.value)}
+					>{#each editions as edition}<option value={edition.id}>{editionLabel(edition)}</option
+						>{/each}</select
+				></label
+			>{/if}
+		{#if loadingDetail}<div class="loading-tracks">Loading tracks…</div>{:else if detailError}<p
+				class="save-hint"
+			>
+				{detailError} Load a complete edition before saving or downloading.
+			</p>
+			<button class="btn btn-secondary" on:click={() => loadDetail(selectedEdition)}
+				>Retry album details</button
+			>{:else if trackList.length}
 			<div class="tracklist-preview">
-				<h3>Tracklist</h3>
+				<h3>Tracklist · {trackList.length} tracks</h3>
 				<div class="tracks">
-					{#each trackList as track}
-						<div class="track-row">
-							<span class="track-num">{track.position}</span>
-							<span class="track-title">{track.title}</span>
-							<span class="track-dur">{formatDuration(track.length || track.recording?.length)}</span>
-						</div>
-					{/each}
+					{#each trackList as track}<div class="track-row">
+							<span class="track-num">{track.disc > 1 ? `${track.disc}.` : ''}{track.position}</span
+							><span class="track-title">{track.title}</span><span class="track-dur"
+								>{formatDuration(track.length || track.recording?.length)}</span
+							>
+						</div>{/each}
 				</div>
 			</div>
 		{/if}
@@ -136,6 +224,45 @@
 </div>
 
 <style>
+	.profile-label,
+	.edition-label {
+		display: grid;
+		gap: 0.4rem;
+		font-size: 0.8rem;
+		color: var(--text-secondary);
+		margin: 1rem 0;
+	}
+	.profile-label select,
+	.edition-label select {
+		min-width: 0;
+		width: 100%;
+	}
+	.monitor-label {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.8rem;
+	}
+	.monitor-label input {
+		accent-color: var(--accent);
+	}
+	.save-hint,
+	.album-reason {
+		font-size: 0.8rem;
+		line-height: 1.6;
+		color: var(--text-secondary);
+		margin: 0.5rem 0;
+	}
+	.action-error {
+		font-size: 0.8rem;
+		line-height: 1.6;
+		color: var(--danger);
+	}
+	.actions {
+		flex-wrap: wrap;
+		margin-top: 0.8rem;
+	}
+
 	/* ── Container ── */
 	.detail {
 		position: relative;
@@ -166,12 +293,16 @@
 		box-shadow: var(--shadow-lg), var(--shadow-glow);
 		flex-shrink: 0;
 		object-fit: cover;
-		transition: transform 0.25s ease, box-shadow 0.25s ease;
+		transition:
+			transform 0.25s ease,
+			box-shadow 0.25s ease;
 	}
 
 	.detail-cover:hover {
 		transform: scale(1.03);
-		box-shadow: var(--shadow-lg), 0 0 24px var(--accent-glow);
+		box-shadow:
+			var(--shadow-lg),
+			0 0 24px var(--accent-glow);
 	}
 
 	.cover-fallback {
@@ -282,7 +413,9 @@
 		padding: 0.5rem 0.75rem;
 		border-radius: var(--radius-md);
 		font-size: 0.85rem;
-		transition: border-color 0.2s ease, box-shadow 0.2s ease;
+		transition:
+			border-color 0.2s ease,
+			box-shadow 0.2s ease;
 		outline: none;
 	}
 
@@ -304,7 +437,10 @@
 		align-items: center;
 		text-decoration: none;
 		cursor: pointer;
-		transition: background 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+		transition:
+			background 0.2s ease,
+			box-shadow 0.2s ease,
+			transform 0.2s ease;
 		outline: none;
 	}
 
@@ -320,7 +456,9 @@
 
 	.btn-primary:hover:not(:disabled) {
 		background: var(--accent-hover);
-		box-shadow: var(--shadow-md), 0 0 16px var(--accent-glow);
+		box-shadow:
+			var(--shadow-md),
+			0 0 16px var(--accent-glow);
 		transform: translateY(-1px);
 	}
 

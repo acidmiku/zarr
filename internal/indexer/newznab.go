@@ -334,49 +334,16 @@ func (c *NewznabClient) SearchMusicByText(idx IndexerConfig, query string) ([]Ne
 	return c.fetch(u, idx.Name)
 }
 
-// SearchMusic searches all indexers for a music album.
-// Tries music category first, falls back to text search with FLAC.
+// SearchMusic retains the original entry point while enforcing album identity.
 func (c *NewznabClient) SearchMusic(indexers []IndexerConfig, artist, album string, year int) []Release {
-	var allReleases []Release
-
-	query := fmt.Sprintf("%s %s", artist, album)
-	if year > 0 {
-		query = fmt.Sprintf("%s %s %d", artist, album, year)
-	}
-
-	for _, idx := range indexers {
-		if !idx.Enabled {
-			continue
-		}
-
-		var items []NewznabItem
-		var err error
-
-		// Try music category first
-		items, err = c.SearchMusicByCategory(idx, query)
-		if err != nil || len(items) == 0 {
-			// Fallback to text search with FLAC keyword
-			items, err = c.SearchMusicByText(idx, query+" FLAC")
-		}
-		if err != nil {
-			slog.Warn("indexer music search failed", "indexer", idx.Name, "error", err)
-			continue
-		}
-
-		for _, item := range items {
-			parsed := ParseMusicReleaseName(item.Title)
-			allReleases = append(allReleases, Release{
-				Title:   item.Title,
-				NZBURL:  item.Link,
-				Size:    item.Size,
-				Quality: parsed.Quality,
-				Tags:    parsed.Tags,
-				Indexer: idx.Name,
-			})
+	result := c.SearchMusicAlbum(indexers, MusicIdentity{Artist: artist, Album: album}, year, nil)
+	var matched []Release
+	for _, release := range result.Releases {
+		if release.Acceptable {
+			matched = append(matched, release)
 		}
 	}
-
-	return allReleases
+	return matched
 }
 
 // SearchAnimeEpisode searches all indexers for an anime episode using absolute numbering.
