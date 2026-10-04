@@ -1,12 +1,61 @@
 <script>
-	import { createEventDispatcher } from 'svelte';
+	import { createEventDispatcher, onMount } from 'svelte';
 	import { api } from '$lib/api';
+	import { matchRecommendation, recommendationQuery } from '$lib/recommendations';
 	import { notify } from '$lib/stores/app';
+	import Artwork from './Artwork.svelte';
 
 	export let rec;
 
 	const dispatch = createEventDispatcher();
 	let adding = false;
+	let resolvedItem = null;
+	let metadataRequest = null;
+	let metadataKey = '';
+	let mounted = false;
+
+	onMount(() => {
+		mounted = true;
+		return () => {
+			mounted = false;
+		};
+	});
+
+	$: if (mounted) loadArtwork(rec);
+	$: posterURL = rec.poster_url || resolvedItem?.poster_url || '';
+
+	// Reuse the same lookup when Add to Library is clicked, so the cover and
+	// detail modal always refer to the same title/year.
+	function resolveMetadata(recommendation) {
+		const key = JSON.stringify([
+			recommendation.title,
+			recommendation.media_type,
+			recommendation.year
+		]);
+		if (!metadataRequest || metadataKey !== key) {
+			metadataKey = key;
+			metadataRequest = api
+				.search(recommendationQuery(recommendation.title).title, recommendation.media_type)
+				.then((results) => matchRecommendation(results, recommendation))
+				.catch((error) => {
+					if (metadataKey === key) metadataRequest = null;
+					throw error;
+				});
+		}
+		return metadataRequest;
+	}
+
+	async function loadArtwork(recommendation) {
+		resolvedItem = null;
+		if (recommendation.poster_url || !['movie', 'series'].includes(recommendation.media_type))
+			return;
+		try {
+			const item = await resolveMetadata(recommendation);
+			if (mounted && rec === recommendation) resolvedItem = item;
+		} catch {
+			// Artwork is optional. Keep the card usable when metadata is offline.
+		}
+	}
 
 	function typeLabel(t) {
 		if (t === 'music') return 'Music';
@@ -51,20 +100,13 @@
 				return;
 			}
 
-			// Search for the title to get metadata
-			const results = await api.search(rec.title, rec.media_type);
+			const item = await resolveMetadata(rec);
 
-			if (!results || results.length === 0) {
+			if (!item) {
 				notify(`Could not find "${rec.title}" in metadata database`, 'error');
 				adding = false;
 				return;
 			}
-
-			// Anime results mix TV and movies. Prefer the requested title over
-			// the first franchise match, which may be the original TV series.
-			const normalizeTitle = (title) => title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-			const wanted = normalizeTitle(rec.title);
-			const item = results.find(result => normalizeTitle(result.title) === wanted) || results[0];
 
 			// Prepare item for MediaDetail modal
 			const detailItem = {
@@ -86,15 +128,15 @@
 </script>
 
 <div class="card">
-	{#if rec.poster_url}
-		<div class="poster">
-			<img src={rec.poster_url} alt={rec.title} loading="lazy" />
-		</div>
-	{/if}
+	<div class="poster" class:music={rec.media_type === 'music'}>
+		<Artwork src={posterURL} title={rec.title} compact />
+	</div>
 	<div class="body">
 		<div class="header">
 			<span class="title">{rec.title}</span>
-			<span class="badge" style="background: {typeColor(rec.media_type)}">{typeLabel(rec.media_type)}</span>
+			<span class="badge" style="background: {typeColor(rec.media_type)}"
+				>{typeLabel(rec.media_type)}</span
+			>
 			{#if rec.score}
 				<span class="score">{rec.score.toFixed(1)}</span>
 			{/if}
@@ -118,19 +160,24 @@
 		backdrop-filter: blur(16px);
 		-webkit-backdrop-filter: blur(16px);
 		box-shadow: var(--shadow-md);
-		transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+		transition:
+			transform 0.25s ease,
+			box-shadow 0.25s ease,
+			border-color 0.25s ease;
 	}
 
 	.card:hover {
 		transform: translateY(-2px);
-		box-shadow: var(--shadow-lg), 0 0 20px var(--accent-glow);
+		box-shadow:
+			var(--shadow-lg),
+			0 0 20px var(--accent-glow);
 		border-color: var(--accent);
 	}
 
 	.poster {
 		width: 60px;
 		min-width: 60px;
-		height: 85px;
+		height: 90px;
 		border-radius: var(--radius-md);
 		overflow: hidden;
 		background: var(--glass-bg);
@@ -138,14 +185,15 @@
 		box-shadow: var(--shadow-sm);
 	}
 
-	.poster img {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
+	.poster.music {
+		height: 60px;
+	}
+
+	.poster :global(img) {
 		transition: transform 0.25s ease;
 	}
 
-	.card:hover .poster img {
+	.card:hover .poster :global(img) {
 		transform: scale(1.05);
 	}
 

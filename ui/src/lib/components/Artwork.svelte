@@ -4,6 +4,7 @@
 	export let src = '';
 	export let title = '';
 	export let eager = false;
+	export let compact = false;
 	let failed = false;
 	$: {
 		src;
@@ -15,8 +16,9 @@
 {#if url && !failed}
 	<img src={url} alt={title} loading={eager ? 'eager' : 'lazy'} on:error={() => (failed = true)} />
 {:else}
-	<div class="artwork-placeholder" aria-label={title || 'No artwork'}>
-		<Image size={28} strokeWidth={1} /><span>{title || 'Artwork unavailable'}</span>
+	<div class="artwork-placeholder" class:compact aria-label={title || 'No artwork'}>
+		<Image size={compact ? 20 : 28} strokeWidth={1} />
+		{#if !compact}<span>{title || 'Artwork unavailable'}</span>{/if}
 	</div>
 {/if}
 
@@ -46,5 +48,9 @@
 		text-transform: uppercase;
 		font-size: 1.4rem;
 		line-height: 1.1;
+	}
+	.artwork-placeholder.compact {
+		min-height: 0;
+		padding: 8px;
 	}
 </style>
