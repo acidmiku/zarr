@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -10,8 +11,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"golang.org/x/time/rate"
 	"mediaforge/internal/database"
 )
 
@@ -23,6 +26,7 @@ type LastFMClient struct {
 	apiKey   string
 	db       *database.DB
 	cacheDir string
+	cache    *musicMetadataCache
 }
 
 func NewLastFMClient(client *http.Client, apiKey string, db *database.DB, configDir string) *LastFMClient {
@@ -33,6 +37,7 @@ func NewLastFMClient(client *http.Client, apiKey string, db *database.DB, config
 		apiKey:   apiKey,
 		db:       db,
 		cacheDir: cacheDir,
+		cache:    newMusicMetadataCache(client, db, rate.NewLimiter(3, 1)),
 	}
 }
 
@@ -72,9 +77,9 @@ type LFMAlbum struct {
 }
 
 type LFMArtist struct {
-	Name string     `json:"name"`
-	MBID string     `json:"mbid"`
-	URL  string     `json:"url"`
+	Name  string     `json:"name"`
+	MBID  string     `json:"mbid"`
+	URL   string     `json:"url"`
 	Image []LFMImage `json:"image"`
 }
 
@@ -89,20 +94,19 @@ type LFMImage struct {
 var trendingTags = []string{"pop", "rock", "electronic", "hip-hop", "indie", "r&b", "alternative", "metal", "jazz", "folk"}
 
 func (c *LastFMClient) TopAlbums(page int) (*LFMTopAlbums, error) {
+	if page < 1 {
+		page = 1
+	}
 	// Last.fm has no chart.getTopAlbums — use tag.getTopAlbums with rotating popular tags
 	tag := trendingTags[(page-1)%len(trendingTags)]
 
-	key := fmt.Sprintf("lastfm:topalbums:%s:%d", tag, page)
 	var result LFMTopAlbums
-	if c.getCached(key, &result) {
-		return &result, nil
-	}
 
 	// tag.getTopAlbums returns albums tagged with a given tag, sorted by popularity
 	// Response wraps in "albums" not "topalbums", so we decode into LFMTagTopAlbums
 	u := fmt.Sprintf("%s?method=tag.getTopAlbums&tag=%s&api_key=%s&format=json&page=%d&limit=50",
 		lastfmBase, url.QueryEscape(tag), c.apiKey, page)
-	tagResp, err := lastfmGet[LFMTagTopAlbums](c.client, u)
+	tagResp, err := lastfmCached[LFMTagTopAlbums](context.Background(), c, u)
 	if err != nil {
 		return nil, err
 	}
@@ -110,44 +114,104 @@ func (c *LastFMClient) TopAlbums(page int) (*LFMTopAlbums, error) {
 	// Convert to LFMTopAlbums so callers don't need to change
 	result.Albums.Album = tagResp.Albums.Album
 
-	c.setCache(key, &result)
 	return &result, nil
 }
 
 func (c *LastFMClient) TopArtists(page int) (*LFMTopArtists, error) {
-	key := fmt.Sprintf("lastfm:topartists:%d", page)
-	var result LFMTopArtists
-	if c.getCached(key, &result) {
-		return &result, nil
+	if page < 1 {
+		page = 1
 	}
 
 	u := fmt.Sprintf("%s?method=chart.getTopArtists&api_key=%s&format=json&page=%d&limit=50",
 		lastfmBase, c.apiKey, page)
-	resp, err := lastfmGet[LFMTopArtists](c.client, u)
+	resp, err := lastfmCached[LFMTopArtists](context.Background(), c, u)
 	if err != nil {
 		return nil, err
 	}
 
-	c.setCache(key, resp)
 	return resp, nil
 }
 
 func (c *LastFMClient) ArtistTopAlbums(artist string, page int) (*LFMArtistTopAlbums, error) {
-	key := fmt.Sprintf("lastfm:artistalbums:%s:%d", artist, page)
-	var result LFMArtistTopAlbums
-	if c.getCached(key, &result) {
-		return &result, nil
+	if page < 1 {
+		page = 1
 	}
 
 	u := fmt.Sprintf("%s?method=artist.getTopAlbums&artist=%s&api_key=%s&format=json&page=%d&limit=50",
 		lastfmBase, url.QueryEscape(artist), c.apiKey, page)
-	resp, err := lastfmGet[LFMArtistTopAlbums](c.client, u)
+	resp, err := lastfmCached[LFMArtistTopAlbums](context.Background(), c, u)
 	if err != nil {
 		return nil, err
 	}
 
-	c.setCache(key, resp)
 	return resp, nil
+}
+
+type LFMSimilarArtists struct {
+	Similar struct {
+		Artist []LFMArtist `json:"artist"`
+	} `json:"similarartists"`
+}
+
+func (c *LastFMClient) similarURL(artist string, limit int) string {
+	if limit < 1 || limit > 50 {
+		limit = 12
+	}
+	return fmt.Sprintf("%s?method=artist.getsimilar&artist=%s&api_key=%s&format=json&limit=%d", lastfmBase, url.QueryEscape(artist), url.QueryEscape(c.apiKey), limit)
+}
+func (c *LastFMClient) SimilarArtists(artist string, limit int) ([]LFMArtist, error) {
+	return c.SimilarArtistsContext(context.Background(), artist, limit)
+}
+func (c *LastFMClient) SimilarArtistsContext(ctx context.Context, artist string, limit int) ([]LFMArtist, error) {
+	result, err := lastfmCached[LFMSimilarArtists](ctx, c, c.similarURL(artist, limit))
+	if err != nil {
+		return nil, err
+	}
+	return result.Similar.Artist, nil
+}
+func (c *LastFMClient) CachedSimilarArtists(artist string, limit int) []LFMArtist {
+	snapshot := c.cache.read(musicCacheKey(c.similarURL(artist, limit)))
+	var result LFMSimilarArtists
+	if json.Unmarshal(snapshot.data, &result) != nil {
+		return []LFMArtist{}
+	}
+	return result.Similar.Artist
+}
+
+func (c *LastFMClient) userTopAlbumsURL(username string) string {
+	return fmt.Sprintf("%s?method=user.gettopalbums&user=%s&api_key=%s&format=json&period=6month&limit=50", lastfmBase, url.QueryEscape(strings.TrimSpace(username)), url.QueryEscape(c.apiKey))
+}
+func (c *LastFMClient) UserTopAlbumsContext(ctx context.Context, username string) ([]LFMAlbum, error) {
+	if strings.TrimSpace(username) == "" {
+		return []LFMAlbum{}, nil
+	}
+	result, err := lastfmCached[LFMTopAlbums](ctx, c, c.userTopAlbumsURL(username))
+	if err != nil {
+		return nil, err
+	}
+	return result.Albums.Album, nil
+}
+func (c *LastFMClient) CachedUserTopAlbums(username string) []LFMAlbum {
+	if strings.TrimSpace(username) == "" {
+		return []LFMAlbum{}
+	}
+	snapshot := c.cache.read(musicCacheKey(c.userTopAlbumsURL(username)))
+	var result LFMTopAlbums
+	if json.Unmarshal(snapshot.data, &result) != nil {
+		return []LFMAlbum{}
+	}
+	return result.Albums.Album
+}
+func lastfmCached[T any](ctx context.Context, c *LastFMClient, rawURL string) (*T, error) {
+	data, err := c.cache.get(ctx, rawURL, 48*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	var result T
+	if err = json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("invalid Last.fm response")
+	}
+	return &result, nil
 }
 
 // CacheImage downloads and caches an image URL from Last.fm.
@@ -198,55 +262,4 @@ func BestImage(images []LFMImage) string {
 		}
 	}
 	return ""
-}
-
-// -- DB cache helpers --
-
-func (c *LastFMClient) getCached(key string, target interface{}) bool {
-	var data string
-	var expiresAt string
-	err := c.db.QueryRow(`SELECT data, expires_at FROM cache WHERE cache_key = ?`, key).Scan(&data, &expiresAt)
-	if err != nil {
-		return false
-	}
-
-	t, err := time.Parse("2006-01-02 15:04:05", expiresAt)
-	if err != nil || time.Now().After(t) {
-		c.db.Exec(`DELETE FROM cache WHERE cache_key = ?`, key)
-		return false
-	}
-
-	if err := json.Unmarshal([]byte(data), target); err != nil {
-		return false
-	}
-	return true
-}
-
-func (c *LastFMClient) setCache(key string, value interface{}) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return
-	}
-	expires := time.Now().Add(48 * time.Hour).Format("2006-01-02 15:04:05")
-	c.db.Exec(`INSERT OR REPLACE INTO cache (cache_key, data, expires_at) VALUES (?, ?, ?)`,
-		key, string(data), expires)
-}
-
-func lastfmGet[T any](client *http.Client, rawURL string) (*T, error) {
-	resp, err := client.Get(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("lastfm request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("lastfm %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result T
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("lastfm decode: %w", err)
-	}
-	return &result, nil
 }

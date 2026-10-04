@@ -4,8 +4,35 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
+
+func TestLastFMArtworkUsesImageCache(t *testing.T) {
+	imageURL := "https://lastfm-img.freetls.fastly.net/i/u/300x300/album.png"
+	var requests atomic.Int32
+	s := &Server{imgCache: newImageCache(t.TempDir()), proxyClient: &http.Client{Transport: domainTransport(func(r *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return artworkResponse(200, artworkPNG(t)), nil
+	})}}
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		s.handleImageProxy(w, httptest.NewRequest("GET", "/api/image?url="+url.QueryEscape(imageURL), nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("Last.fm cover rejected: %d", w.Code)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("fetched cached Last.fm image %d times", requests.Load())
+	}
+	for _, raw := range []string{"https://lastfm-img.freetls.fastly.net.evil.example/album.png", "https://lastfm-img.freetls.fastly.net@evil.example/album.png"} {
+		if allowedImageURL(raw) {
+			t.Fatalf("allowed spoofed image host: %s", raw)
+		}
+	}
+}
 
 func TestImageProxyRejectsHTMLAndUnexpectedRedirects(t *testing.T) {
 	for _, redirect := range []bool{false, true} {
@@ -28,5 +55,42 @@ func TestImageProxyRejectsHTMLAndUnexpectedRedirects(t *testing.T) {
 		if allowedImageURL(raw) {
 			t.Fatal(raw)
 		}
+	}
+}
+
+func TestImageCacheLateOwnersRecheckCompletedFetch(t *testing.T) {
+	cache := newImageCache(t.TempDir())
+	imageURL := "https://image.tmdb.org/example.png"
+	var requests atomic.Int32
+	client := &http.Client{Transport: domainTransport(func(r *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return artworkResponse(200, artworkPNG(t)), nil
+	})}
+	var ready, finished sync.WaitGroup
+	ready.Add(16)
+	finished.Add(16)
+	published := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		go func() {
+			defer finished.Done()
+			if cache.get(imageURL) != nil {
+				t.Error("test cache unexpectedly prepopulated")
+			}
+			ready.Done()
+			<-published
+			result := cache.fetchOrJoin(context.Background(), client, imageURL)
+			if result.status != 200 {
+				t.Error("cached result unavailable", result.status)
+			}
+		}()
+	}
+	ready.Wait()
+	if result := cache.fetchOrJoin(context.Background(), client, imageURL); result.status != 200 {
+		t.Fatal(result.err)
+	}
+	close(published)
+	finished.Wait()
+	if requests.Load() != 1 {
+		t.Fatal("late cache misses repeated completed download", requests.Load())
 	}
 }

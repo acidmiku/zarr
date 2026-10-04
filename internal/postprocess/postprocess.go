@@ -345,28 +345,28 @@ func (p *Processor) episodePlan(mediaID int, requested sql.NullInt64, title stri
 var discDirectory = regexp.MustCompile(`(?i)^(?:cd|disc|disk)[ _.-]*(\d+)$`)
 
 func (p *Processor) albumPlan(albumID int, path string) ([]importFile, error) {
-	var artist, title string
+	var album albumIdentity
 	var year sql.NullInt64
-	if err := p.db.QueryRow(`SELECT a.name, al.title, al.year FROM albums al JOIN artists a ON a.id = al.artist_id WHERE al.id = ?`, albumID).Scan(&artist, &title, &year); err != nil {
+	var qualities string
+	if err := p.db.QueryRow(`SELECT COALESCE(p.qualities,'') FROM albums a LEFT JOIN quality_profiles p ON p.id=a.quality_profile_id WHERE a.id=?`, albumID).Scan(&qualities); err != nil {
+		return nil, err
+	}
+	if err := p.db.QueryRow(`SELECT a.name,al.title,al.year,COALESCE(a.mbid,''),COALESCE(al.mbid,''),COALESCE(al.release_group_id,''),al.edition_title,al.edition_disambiguation FROM albums al JOIN artists a ON a.id=al.artist_id WHERE al.id=?`, albumID).Scan(&album.artist, &album.title, &year, &album.artistID, &album.releaseID, &album.groupID, &album.editionTitle, &album.edition); err != nil {
 		return nil, err
 	}
 	files, err := findAudioFiles(path)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := p.db.Query(`SELECT id, number, COALESCE(disc_number,1), title, file_path FROM tracks WHERE album_id = ?`, albumID)
+	rows, err := p.db.Query(`SELECT id,number,COALESCE(disc_number,1),title,file_path,COALESCE(mbid,'') FROM tracks WHERE album_id=?`, albumID)
 	if err != nil {
 		return nil, err
 	}
-	type track struct {
-		id, number, disc int
-		title            string
-		path             sql.NullString
-	}
-	var tracks []track
+
+	var tracks []albumTrack
 	for rows.Next() {
-		var t track
-		if err := rows.Scan(&t.id, &t.number, &t.disc, &t.title, &t.path); err != nil {
+		var t albumTrack
+		if err := rows.Scan(&t.id, &t.number, &t.disc, &t.title, &t.path, &t.recordingID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -377,41 +377,94 @@ func (p *Processor) albumPlan(albumID int, path string) ([]importFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return p.planAlbumFiles(album, int(year.Int64), tracks, files, qualities)
+}
+
+func (p *Processor) planAlbumFiles(album albumIdentity, year int, tracks []albumTrack, files []string, qualities string) ([]importFile, error) {
 	var plan []importFile
-	for _, src := range files {
-		number, disc := parseTrackNumber(filepath.Base(src))
-		if m := discDirectory.FindStringSubmatch(filepath.Base(filepath.Dir(src))); m != nil {
-			disc, _ = strconv.Atoi(m[1])
-		}
-		found := false
-		for _, t := range tracks {
-			if t.number == number && t.disc == disc {
-				dst := MusicTrackPath(p.mediaRoot, artist, title, int(year.Int64), t.number, t.disc, t.title, filepath.Ext(src))
-				plan = append(plan, importFile{src: src, dst: dst, trackID: t.id, replace: t.path.Valid && filepath.Clean(t.path.String) == filepath.Clean(dst)})
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("cannot match audio track: %s", filepath.Base(src))
+	maxDisc := 1
+	for _, t := range tracks {
+		if t.disc > maxDisc {
+			maxDisc = t.disc
 		}
 	}
 	covered := map[int]bool{}
-	for _, file := range plan {
-		covered[file.trackID] = true
+	for _, src := range files {
+		tags, err := readAudioIdentity(src)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(src), err)
+		}
+		if err := album.validate(tags); err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(src), err)
+		}
+		if err := validateMusicCodec(tags, qualities); err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(src), err)
+		}
+		fileTitle, number, disc := audioFilenameIdentity(src)
+		if tags.track > 0 {
+			number = tags.track
+		}
+		if tags.disc > 0 {
+			disc = tags.disc
+		}
+		if disc == 0 && maxDisc == 1 {
+			disc = 1
+		}
+		trackTitle := tags.title
+		if trackTitle == "" {
+			trackTitle = fileTitle
+		}
+		if trackTitle == "" && tags.recordingID == "" {
+			return nil, fmt.Errorf("cannot identify untagged numeric-only audio track: %s", filepath.Base(src))
+		}
+		var selected *albumTrack
+		for i := range tracks {
+			t := &tracks[i]
+			if number > 0 && t.number != number || disc > 0 && t.disc != disc {
+				continue
+			}
+			if tags.recordingID != "" && t.recordingID != "" && !musicIDEqual(tags.recordingID, t.recordingID) {
+				continue
+			}
+			if trackTitle != "" && !indexer.MatchesMusicName(trackTitle, t.title) && !(tags.title == "" && indexer.MatchesMusicName(trackTitle, album.artist+" "+t.title)) {
+				continue
+			}
+			if selected != nil {
+				return nil, fmt.Errorf("ambiguous audio track; disc/track tags required: %s", filepath.Base(src))
+			}
+			selected = t
+		}
+		if selected == nil {
+			return nil, fmt.Errorf("track title, recording ID or numbering does not match selected album: %s", filepath.Base(src))
+		}
+		if covered[selected.id] {
+			return nil, fmt.Errorf("duplicate source for disc %d track %d", selected.disc, selected.number)
+		}
+		// Different country/label releases can share this exact tracklist. A
+		// conflicting edition ID needs a matching group or recording identity.
+		if tags.releaseID != "" && album.releaseID != "" && !musicIDEqual(tags.releaseID, album.releaseID) {
+			groupMatches := tags.groupID != "" && album.groupID != "" && musicIDEqual(tags.groupID, album.groupID)
+			recordingMatches := tags.recordingID != "" && selected.recordingID != "" && musicIDEqual(tags.recordingID, selected.recordingID)
+			if !groupMatches && !recordingMatches {
+				return nil, fmt.Errorf("different release edition cannot be verified: %s", filepath.Base(src))
+			}
+		}
+		t := selected
+		covered[t.id] = true
+		dst := MusicTrackPath(p.mediaRoot, album.artist, album.title, year, t.number, t.disc, t.title, filepath.Ext(src))
+		plan = append(plan, importFile{src: src, dst: dst, previous: t.path.String, trackID: t.id, replace: t.path.Valid && filepath.Clean(t.path.String) == filepath.Clean(dst)})
 	}
-	for _, track := range tracks {
-		if covered[track.id] {
+	for _, t := range tracks {
+		if covered[t.id] {
 			continue
 		}
-		if track.path.Valid {
-			if info, err := os.Stat(track.path.String); err == nil && info.Mode().IsRegular() {
+		if t.path.Valid {
+			if info, err := os.Stat(t.path.String); err == nil && info.Mode().IsRegular() {
 				continue
 			}
 		}
-		return nil, fmt.Errorf("album download is incomplete: missing disc %d track %d; source retained", track.disc, track.number)
+		return nil, fmt.Errorf("album download is incomplete: missing disc %d track %d; source retained", t.disc, t.number)
 	}
-
 	return plan, nil
 }
 

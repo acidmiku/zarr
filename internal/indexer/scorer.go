@@ -107,15 +107,11 @@ func ScoreRelease(rel *Release, profile *QualityProfile) {
 	}
 
 	if qualityIndex == -1 {
-		// Music releases often lack quality info in the title — accept with low score
-		if profile.ProfileType == "music" && rel.Quality == "" {
-			rel.Quality = "unknown"
-			rel.Score = 1
-			rel.Acceptable = true
-			return
-		}
 		rel.Acceptable = false
 		rel.RejectReason = "quality not in profile"
+		if profile.ProfileType == "music" && rel.Quality == "" {
+			rel.RejectReason = "audio codec is unknown; cannot verify requested quality"
+		}
 		return
 	}
 

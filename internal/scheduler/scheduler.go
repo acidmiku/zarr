@@ -89,6 +89,9 @@ func (s *Scheduler) Start() {
 		s.db.Exec("UPDATE " + table + " SET status='wanted' WHERE status='searching'")
 	}
 
+	// Interrupted requests resume after restart; the download-ID boundary prevents duplicate grabs.
+	s.db.Exec(`UPDATE music_search_requests SET status='queued',message='Resuming interrupted music search.',updated_at=CURRENT_TIMESTAMP WHERE status='searching'`)
+
 	// Retry previously failed downloads on startup
 	s.retryFailedDownloads()
 
@@ -98,6 +101,7 @@ func (s *Scheduler) Start() {
 	s.runTask(ctx, "episode-check", 30*time.Minute, s.checkEpisodeAirDates)
 	s.runTask(ctx, "quality-upgrades", 30*time.Minute, s.checkQualityUpgrades)
 	s.runTask(ctx, "music-search", 30*time.Minute, s.searchWantedAlbums)
+	s.runTask(ctx, "music-requests", 3*time.Second, s.processMusicRequests)
 	s.runTask(ctx, "seed-cleanup", 30*time.Minute, s.cleanupSeededTorrents)
 	s.runTask(ctx, "metadata-refresh", 24*time.Hour, s.refreshMetadata)
 	s.runTask(ctx, "mapping-refresh", 24*time.Hour, s.refreshMapping)
@@ -178,6 +182,7 @@ func (s *Scheduler) retryFailedDownloads() {
 		slog.Info("retrying failed download", "id", r.id, "path", resolved)
 		if err := s.processor.Process(r.id, resolved); err != nil {
 			slog.Debug("retry still failed", "id", r.id, "error", err)
+			s.db.Exec(`UPDATE downloads SET error_message=? WHERE id=?`, "Import failed: "+err.Error(), r.id)
 		} else {
 			postprocess.CleanDownloadDir(resolved)
 			slog.Info("retry succeeded", "id", r.id)
@@ -230,6 +235,7 @@ func (s *Scheduler) pollDownloads() {
 			// Trigger post-processing
 			if err := s.processor.Process(dlID, storagePath); err != nil {
 				slog.Error("post-processing failed", "download_id", dlID, "error", err)
+				s.db.Exec(`UPDATE downloads SET error_message=? WHERE id=?`, "Import failed: "+err.Error(), dlID)
 				s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ? AND status != 'cancelled'`, dlID)
 				// Import/path failures retain the downloaded source for an
 				// explicit retry; searching again would re-grab the same release.
@@ -383,100 +389,6 @@ func (s *Scheduler) refreshMapping() {
 		if err := s.mapping.Refresh(); err != nil {
 			slog.Error("mapping refresh failed", "error", err)
 		}
-	}
-}
-
-// searchWantedAlbums searches for all albums with "wanted" status.
-func (s *Scheduler) searchWantedAlbums() {
-	rows, err := s.db.Query(`SELECT al.id, a.name, al.title, COALESCE(al.year,0), COALESCE(al.quality_profile_id,0)
-		FROM albums al JOIN artists a ON al.artist_id = a.id
-		WHERE al.status = 'wanted'`)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var albumID, year, profileID int
-		var artist, title string
-		if err := rows.Scan(&albumID, &artist, &title, &year, &profileID); err != nil {
-			continue
-		}
-		s.searchAndGrabAlbum(albumID, artist, title, year, profileID)
-	}
-}
-
-// searchAndGrabAlbum searches indexers for a specific album and grabs the best release.
-func (s *Scheduler) searchAndGrabAlbum(albumID int, artist, title string, year, profileID int) {
-	claimed, claimErr := s.db.Exec(`UPDATE albums SET status = 'searching' WHERE id = ? AND status = 'wanted'`, albumID)
-	if claimErr != nil {
-		return
-	}
-	count, _ := claimed.RowsAffected()
-	if count != 1 {
-		return
-	}
-	defer s.db.Exec(`UPDATE albums SET status = 'wanted' WHERE id = ? AND status = 'searching'`, albumID)
-
-	allIndexers := s.loadIndexers()
-	if len(allIndexers) == 0 {
-		return
-	}
-
-	profile := s.loadProfile(profileID)
-	if profile == nil {
-		return
-	}
-
-	// Newznab search
-	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "music")
-	releases := s.newznab.SearchMusic(newznabIdxs, artist, title, year)
-	for i := range releases {
-		releases[i].DownloadType = "nzb"
-	}
-
-	// Rutracker search
-	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "music")
-	if len(rtIndexers) > 0 && s.rtClient != nil {
-		query := fmt.Sprintf("%s %s", artist, title)
-		forumIDs := rutracker.DefaultForumIDs["music"]
-		for _, idx := range rtIndexers {
-			results, err := s.rtClient.Search(query, forumIDs, idx.Username, idx.Password)
-			if err != nil {
-				slog.Warn("rutracker music search failed", "indexer", idx.Name, "error", err)
-				continue
-			}
-			for _, r := range results {
-				parsed := indexer.ParseMusicReleaseName(r.Title)
-				releases = append(releases, indexer.Release{
-					Title:        r.Title,
-					Size:         r.Size,
-					Quality:      parsed.Quality,
-					Tags:         parsed.Tags,
-					Indexer:      idx.Name,
-					DownloadType: "torrent",
-					Seeders:      r.Seeders,
-					Leechers:     r.Leechers,
-					TopicID:      r.TopicID,
-				})
-			}
-		}
-	}
-
-	// Filter blacklisted releases and score
-	albumBlacklist := s.loadAlbumBlacklist(albumID)
-	releases = indexer.FilterBlacklisted(releases, albumBlacklist)
-	for i := range releases {
-		indexer.ScoreRelease(&releases[i], profile)
-	}
-
-	best := indexer.BestRelease(releases)
-	if best == nil {
-		return
-	}
-
-	if err := s.enqueueRelease(0, 0, albumID, *best); err != nil {
-		slog.Warn("enqueue release failed", "title", best.Title, "error", err)
 	}
 }
 
@@ -663,6 +575,7 @@ func (s *Scheduler) pollTorrentDownloads() {
 			s.db.Exec(`UPDATE downloads SET download_path = ?, completed_at_ts = COALESCE(completed_at_ts, ?) WHERE id = ?`, contentPath, time.Now().Unix(), dlID)
 			if err := s.processor.ProcessTorrent(dlID, contentPath); err != nil {
 				slog.Error("torrent import failed; source retained for retry", "download_id", dlID, "error", err)
+				s.db.Exec(`UPDATE downloads SET error_message=? WHERE id=?`, "Import failed: "+err.Error(), dlID)
 				s.db.Exec(`UPDATE downloads SET status = 'failed' WHERE id = ? AND status != 'cancelled'`, dlID)
 			}
 		}
@@ -1001,6 +914,10 @@ func resolveSABnzbdPath(sabPath string) string {
 	return sabPath
 }
 func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.Release, baseline ...string) error {
+	return s.enqueueReleaseForRequest(0, mediaID, episodeID, albumID, rel, baseline...)
+}
+
+func (s *Scheduler) enqueueReleaseForRequest(requestID, mediaID, episodeID, albumID int, rel indexer.Release, baseline ...string) error {
 	var media, episode, album any
 	if mediaID > 0 {
 		media = mediaID
@@ -1054,6 +971,10 @@ func (s *Scheduler) enqueueRelease(mediaID, episodeID, albumID int, rel indexer.
 			query += ` AND EXISTS(SELECT 1 FROM media_items m WHERE m.id=? AND m.status='available' AND COALESCE(NULLIF(m.current_release_title,''),(SELECT d.nzb_title FROM downloads d WHERE d.media_item_id=m.id AND d.episode_id IS NULL AND d.status IN ('imported','seeding') ORDER BY d.completed_at DESC,d.id DESC LIMIT 1),'')=?)`
 			args = append(args, mediaID, baseline[0])
 		}
+	}
+	if requestID > 0 {
+		query += ` AND EXISTS(SELECT 1 FROM music_search_requests r JOIN albums a ON a.id=r.album_id WHERE r.id=? AND r.album_id=? AND r.status='searching' AND (r.automatic=0 OR a.monitored=1))`
+		args = append(args, requestID, albumID)
 	}
 	res, err := s.db.Exec(query, args...)
 

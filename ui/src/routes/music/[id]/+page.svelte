@@ -5,7 +5,9 @@
 	import { api } from '$lib/api';
 	import { notify } from '$lib/stores/app';
 	import TrackList from '$lib/components/TrackList.svelte';
-	import StatusBadge from '$lib/components/StatusBadge.svelte';
+	import Artwork from '$lib/components/Artwork.svelte';
+	import MusicAcquisition from '$lib/components/MusicAcquisition.svelte';
+	import { musicArtwork, acquisitionState } from '$lib/music';
 	import StarRating from '$lib/components/StarRating.svelte';
 
 	let album = null;
@@ -29,7 +31,9 @@
 
 	onMount(async () => {
 		await loadAlbum();
-		profiles = await api.getProfiles();
+		try {
+			profiles = await api.getProfiles();
+		} catch {}
 		loading = false;
 	});
 
@@ -43,16 +47,17 @@
 				userComment = album.rating_comment || '';
 			}
 		} catch (e) {
-			notify('Failed to load album', 'error');
+			error = e.message || 'Failed to load album';
 		}
 	}
 
 	async function searchAlbum() {
+		if (searchingReleases) return;
 		showReleases = true;
 		searchingReleases = true;
 		error = '';
 		try {
-			releases = await api.searchMusicAlbum(id);
+			releases = await api.getMusicReleases(id);
 			if (!Array.isArray(releases)) releases = [];
 		} catch (e) {
 			error = e.message;
@@ -66,7 +71,8 @@
 		try {
 			const data = {
 				release_url: rel.nzb_url,
-				album_id: id
+				album_id: id,
+				title: rel.title
 			};
 			if (rel.download_type === 'torrent') {
 				data.download_type = 'torrent';
@@ -86,7 +92,7 @@
 		try {
 			await api.deleteMusicLibraryItem(id);
 			notify('Album removed', 'success');
-			goto('/music');
+			goto('/music?tab=library');
 		} catch (e) {
 			error = e.message;
 		}
@@ -105,10 +111,16 @@
 		}
 		savingRating = false;
 	}
-
-	$: coverSrc = album?.release_group_id ? api.musicCoverUrl(album.release_group_id) : '';
-	$: imageSrc = album?.image_url ? api.imageUrl(album.image_url) : '';
 </script>
+
+<svelte:window
+	on:keydown={(event) => {
+		if (event.key === 'Escape') {
+			showReleases = false;
+			showRatingModal = false;
+		}
+	}}
+/>
 
 <svelte:head>
 	<title>{album?.title || 'Loading'} - Music - Zarr</title>
@@ -119,25 +131,16 @@
 {:else if album}
 	<div class="detail-page">
 		<div class="content">
-			<a href="/music" class="back-link">← Music Library</a>
+			<a href="/music?tab=library" class="back-link">← Music Library</a>
 
 			<div class="header">
-				<div class="cover-art">
-					{#if coverSrc}
-						<img src={coverSrc} alt={album.title} on:error={(e) => e.target.style.display = 'none'} />
-					{/if}
-					{#if imageSrc}
-						<img src={imageSrc} alt={album.title} class="fallback" />
-					{/if}
-					<div class="cover-placeholder">{(album.title || '?')[0]}</div>
-				</div>
+				<div class="cover-art"><Artwork src={musicArtwork(album)} title={album.title} eager /></div>
 				<div class="info">
 					<h1>{album.title}</h1>
 					<div class="meta-row">
 						<span class="artist-name">{album.artist_name}</span>
 						{#if album.year}<span>{album.year}</span>{/if}
 						{#if album.album_type}<span class="type-tag">{album.album_type}</span>{/if}
-						<StatusBadge status={album.status} />
 					</div>
 
 					{#if album.rating}
@@ -151,20 +154,24 @@
 
 					<div class="meta-details">
 						<span>{album.track_count} tracks</span>
-						{#if album.release_group_id}<span>MBID: {album.release_group_id.slice(0, 8)}...</span>{/if}
+						{#if profiles.find((profile) => profile.id === album.quality_profile_id)}<span
+								>{profiles.find((profile) => profile.id === album.quality_profile_id).name}</span
+							>{/if}
 					</div>
 
+					<MusicAcquisition
+						bind:album
+						on:updated={(e) => {
+							album = e.detail;
+							if (acquisitionState(album).status === 'available') loadAlbum();
+						}}
+					/>
 					<div class="toolbar">
-						<button class="btn btn-primary" on:click={searchAlbum}>Search</button>
-						<button class="btn btn-secondary" on:click={() => { showReleases = true; searchAlbum(); }}>View Releases</button>
-						<button class="btn btn-secondary" on:click={() => showRatingModal = true}>
+						<button class="btn btn-secondary" on:click={searchAlbum}>View Releases</button>
+						<button class="btn btn-secondary" on:click={() => (showRatingModal = true)}>
 							{album.rating ? 'Edit Rating' : 'Rate'}
 						</button>
-						<select value={album.quality_profile_id}>
-							{#each profiles.filter(p => p.profile_type === 'music') as p}
-								<option value={p.id}>{p.name}</option>
-							{/each}
-						</select>
+
 						<button class="btn btn-danger" on:click={deleteAlbum}>Delete</button>
 					</div>
 
@@ -185,21 +192,35 @@
 
 	{#if showReleases}
 		<!-- svelte-ignore a11y-click-events-have-key-events -->
-		<div class="modal-overlay" on:click={() => showReleases = false} role="presentation">
-			<div class="modal releases-modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
+		<div class="modal-overlay" on:click={() => (showReleases = false)} role="presentation">
+			<div
+				class="modal releases-modal"
+				on:click|stopPropagation
+				on:keydown|stopPropagation
+				role="dialog"
+			>
 				<h2>Available Releases</h2>
+				<button class="btn btn-secondary" on:click={() => (showReleases = false)}
+					>Close releases</button
+				>
+				{#if error}<p class="error-banner" role="alert">{error}</p>{/if}
 				{#if searchingReleases}
 					<div class="loading">Searching indexers...</div>
 				{:else if releases.length === 0}
-					<div class="empty">No releases found</div>
+					<div class="empty">
+						No matching releases found. Download now records a search outcome and checks source
+						availability.
+					</div>
 				{:else}
 					<div class="releases-list">
-						{#each releases.sort((a, b) => b.score - a.score) as rel}
+						{#each [...releases].sort((a, b) => b.score - a.score) as rel}
 							<div class="release" class:rejected={!rel.acceptable}>
 								<div class="rel-info">
 									<div class="rel-title">{rel.title}</div>
 									<div class="rel-meta">
-										<span class="rel-type-badge" class:torrent={rel.download_type === 'torrent'}>{rel.download_type === 'torrent' ? 'Torrent' : 'NZB'}</span>
+										<span class="rel-type-badge" class:torrent={rel.download_type === 'torrent'}
+											>{rel.download_type === 'torrent' ? 'Torrent' : 'NZB'}</span
+										>
 										{#if rel.quality}<span class="rel-quality">{rel.quality}</span>{/if}
 										{#if rel.indexer}<span>via {rel.indexer}</span>{/if}
 										{#if rel.size}<span>{(rel.size / 1024 / 1024).toFixed(0)} MB</span>{/if}
@@ -225,8 +246,13 @@
 
 	{#if showRatingModal}
 		<!-- svelte-ignore a11y-click-events-have-key-events -->
-		<div class="modal-overlay" on:click={() => showRatingModal = false} role="presentation">
-			<div class="modal rating-modal" on:click|stopPropagation on:keydown|stopPropagation role="dialog">
+		<div class="modal-overlay" on:click={() => (showRatingModal = false)} role="presentation">
+			<div
+				class="modal rating-modal"
+				on:click|stopPropagation
+				on:keydown|stopPropagation
+				role="dialog"
+			>
 				<h2>{album.rating ? 'Edit Rating' : 'Rate Album'}</h2>
 				<div class="rating-input">
 					<StarRating bind:value={userRating} />
@@ -236,17 +262,28 @@
 				</div>
 				<div class="comment-input">
 					<label for="rating-comment">Comment (optional)</label>
-					<textarea id="rating-comment" bind:value={userComment} placeholder="What did you think?" rows="3"></textarea>
+					<textarea
+						id="rating-comment"
+						bind:value={userComment}
+						placeholder="What did you think?"
+						rows="3"
+					></textarea>
 				</div>
 				<div class="modal-actions">
 					<button class="btn btn-primary" on:click={saveRating} disabled={savingRating}>
 						{savingRating ? 'Saving...' : 'Save Rating'}
 					</button>
-					<button class="btn btn-secondary" on:click={() => showRatingModal = false}>Cancel</button>
+					<button class="btn btn-secondary" on:click={() => (showRatingModal = false)}
+						>Cancel</button
+					>
 				</div>
 			</div>
 		</div>
 	{/if}
+{:else}
+	<div class="loading" role="alert">
+		{error || 'Album unavailable'} <a href="/music?tab=library">Return to library</a>
+	</div>
 {/if}
 
 <style>
@@ -257,8 +294,14 @@
 	}
 
 	@keyframes fadeSlideUp {
-		from { opacity: 0; transform: translateY(14px); }
-		to   { opacity: 1; transform: translateY(0); }
+		from {
+			opacity: 0;
+			transform: translateY(14px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	.content {
@@ -306,7 +349,9 @@
 		flex-shrink: 0;
 		position: relative;
 		background: linear-gradient(135deg, var(--bg-elevated), var(--bg-surface));
-		box-shadow: var(--shadow-lg), 0 0 0 1px var(--glass-border);
+		box-shadow:
+			var(--shadow-lg),
+			0 0 0 1px var(--glass-border);
 		transition: box-shadow 0.25s ease;
 	}
 
@@ -567,7 +612,8 @@
 	}
 
 	/* ---- Loading & empty states ---- */
-	.loading, .empty {
+	.loading,
+	.empty {
 		text-align: center;
 		color: var(--text-muted);
 		font-family: var(--font-body);
@@ -591,13 +637,23 @@
 	}
 
 	@keyframes fadeIn {
-		from { opacity: 0; }
-		to   { opacity: 1; }
+		from {
+			opacity: 0;
+		}
+		to {
+			opacity: 1;
+		}
 	}
 
 	@keyframes scaleIn {
-		from { opacity: 0; transform: scale(0.96) translateY(8px); }
-		to   { opacity: 1; transform: scale(1) translateY(0); }
+		from {
+			opacity: 0;
+			transform: scale(0.96) translateY(8px);
+		}
+		to {
+			opacity: 1;
+			transform: scale(1) translateY(0);
+		}
 	}
 
 	/* ---- Releases modal ---- */
@@ -781,7 +837,9 @@
 		font-family: var(--font-body);
 		font-size: 0.85rem;
 		line-height: 1.5;
-		transition: border-color 0.2s ease, box-shadow 0.2s ease;
+		transition:
+			border-color 0.2s ease,
+			box-shadow 0.2s ease;
 	}
 
 	.comment-input textarea:focus {

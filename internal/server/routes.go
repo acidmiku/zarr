@@ -54,7 +54,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/ratings/{tmdbID}", s.runtimeHandler((*Server).handleDeleteRating))
 
 	// Music
+	s.mux.HandleFunc("GET /api/music/resolve", s.runtimeHandler((*Server).handleResolveMusicAlbum))
 	s.mux.HandleFunc("GET /api/music/search", s.runtimeHandler((*Server).handleMusicSearch))
+	s.mux.HandleFunc("GET /api/music/discover", s.runtimeHandler((*Server).handleMusicDiscover))
 	s.mux.HandleFunc("GET /api/music/trending", s.runtimeHandler((*Server).handleMusicTrending))
 	s.mux.HandleFunc("GET /api/music/artist/{mbid}", s.runtimeHandler((*Server).handleMusicArtist))
 	s.mux.HandleFunc("GET /api/music/album/{rgid}", s.runtimeHandler((*Server).handleMusicAlbum))
@@ -64,6 +66,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/music/library/{id}", s.runtimeHandler((*Server).handleGetMusicLibraryItem))
 	s.mux.HandleFunc("DELETE /api/music/library/{id}", s.runtimeHandler((*Server).handleDeleteMusicLibraryItem))
 	s.mux.HandleFunc("POST /api/music/library/{id}/search", s.runtimeHandler((*Server).handleSearchMusicAlbum))
+	s.mux.HandleFunc("POST /api/music/library/{id}/download", s.runtimeHandler((*Server).handleDownloadMusicAlbum))
+	s.mux.HandleFunc("PATCH /api/music/library/{id}/monitor", s.runtimeHandler((*Server).handleMonitorMusicAlbum))
+	s.mux.HandleFunc("PATCH /api/music/library/{id}/favorite", s.runtimeHandler((*Server).handleFavoriteMusicAlbum))
 	s.mux.HandleFunc("PUT /api/music/library/{id}/rate", s.runtimeHandler((*Server).handleRateMusicAlbum))
 	s.mux.HandleFunc("GET /api/music/library/{id}/releases", s.runtimeHandler((*Server).handleMusicReleases))
 	s.mux.HandleFunc("POST /api/music/releases/grab", s.runtimeHandler((*Server).handleGrabMusicRelease))

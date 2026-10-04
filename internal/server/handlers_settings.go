@@ -23,7 +23,7 @@ var secretSettings = map[string]string{
 }
 var settingsDefaults = map[string]string{
 	"proxy": "", "media_root": "/data/media", "tmdb_api_key": "", "sabnzbd_url": "http://sabnzbd:8080", "sabnzbd_api_key": "",
-	"setup_complete": "false", "lastfm_api_key": "", "qbittorrent_enabled": "false", "qbittorrent_url": "http://qbittorrent:9090",
+	"setup_complete": "false", "lastfm_api_key": "", "lastfm_username": "", "qbittorrent_enabled": "false", "qbittorrent_url": "http://qbittorrent:9090",
 	"qbittorrent_username": "admin", "qbittorrent_password": "", "torrent_seed_time_hours": "24", "torrent_remove_after_seed": "true",
 	"openrouter_api_key": "", "openrouter_model": "moonshotai/kimi-k3", "openrouter_reasoning_effort": "high", "brave_api_key": "",
 	"ai_personality_preset": "default", "ai_personality_custom": "",
@@ -108,6 +108,10 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			value = strings.TrimRight(value, "/")
+		}
+		if key == "lastfm_username" && (len(value) > 100 || strings.ContainsAny(value, "\r\n")) {
+			writeError(w, 400, "Last.fm username is too long or invalid")
+			return
 		}
 		if key == "media_root" && (value == "" || !filepath.IsAbs(value)) {
 			writeError(w, 400, "media_root must be an absolute path")

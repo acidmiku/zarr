@@ -427,6 +427,7 @@ type importItem struct {
 	Type             string `json:"type"` // movie, series, anime, music
 	TMDBID           int    `json:"tmdb_id,omitempty"`
 	ReleaseGroupID   string `json:"release_group_id,omitempty"`
+	ReleaseID        string `json:"release_id,omitempty"`
 	ArtistMBID       string `json:"artist_mbid,omitempty"`
 	ArtistName       string `json:"artist_name,omitempty"`
 	AlbumTitle       string `json:"album_title,omitempty"`
@@ -828,203 +829,61 @@ func (s *Server) importSeries(item importItem, anime bool) importResult {
 }
 
 func (s *Server) importMusic(item importItem) importResult {
-	res := importResult{SourcePath: item.SourcePath}
-
+	res := importResult{SourcePath: item.SourcePath, Status: "error"}
 	if item.ReleaseGroupID == "" {
-		res.Status = "error"
 		res.Message = "release_group_id required"
 		return res
 	}
-
 	if s.musicbrainz == nil {
-		res.Status = "error"
 		res.Message = "MusicBrainz not configured"
 		return res
 	}
-
-	if strings.TrimSpace(item.ArtistMBID) == "" || strings.TrimSpace(item.ArtistName) == "" || strings.TrimSpace(item.AlbumTitle) == "" {
-		res.Status = "error"
-		res.Message = "artist_mbid, artist_name, and album_title required"
+	if s.processor == nil {
+		res.Message = "Media importer not configured"
 		return res
 	}
-	var audioFiles []string
-	if err := filepath.Walk(item.SourcePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && postprocess.IsAudioFile(info.Name()) {
-			audioFiles = append(audioFiles, path)
-		}
-		return nil
-	}); err != nil {
-		res.Status = "error"
-		res.Message = "cannot read source: " + err.Error()
-		return res
-	}
-	if len(audioFiles) == 0 {
-		res.Status = "error"
-		res.Message = "no audio files found"
-		return res
-	}
-	// Check already in library
 	var existingID int
-	if s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, item.ReleaseGroupID).Scan(&existingID) == nil {
+	if s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id=?`, item.ReleaseGroupID).Scan(&existingID) == nil {
 		res.Status = "skipped"
 		res.Message = "already in library"
 		res.LibraryID = existingID
 		return res
 	}
-
-	// Get artist info
-	artistName := item.ArtistName
-	artistMBID := item.ArtistMBID
-	albumTitle := item.AlbumTitle
-
-	// Find or create artist
-	var artistID int
-	err := s.db.QueryRow(`SELECT id FROM artists WHERE mbid = ?`, artistMBID).Scan(&artistID)
-	if err != nil {
-		result, err := s.db.Exec(`INSERT INTO artists (mbid, name, sort_name) VALUES (?, ?, ?)`,
-			artistMBID, artistName, artistName)
-		if err != nil {
-			res.Status = "error"
-			res.Message = "create artist: " + err.Error()
-			return res
-		}
-		id, _ := result.LastInsertId()
-		artistID = int(id)
-	}
-
-	// Get release info from MusicBrainz
-	release, err := s.musicbrainz.GetBestRelease(item.ReleaseGroupID)
-	if err != nil {
-		res.Status = "error"
-		res.Message = "MusicBrainz release lookup failed: " + err.Error()
+	// Resolve canonical identity server-side; client labels cannot authorize
+	// mislabelling another artist's release or an unrelated release edition.
+	group, err := s.musicbrainz.GetReleaseGroup(item.ReleaseGroupID)
+	if err != nil || group == nil || len(group.ArtistCredit) == 0 {
+		res.Message = "MusicBrainz album identity lookup failed"
 		return res
 	}
-
-	// Determine year from release date
-	year := 0
-	if release != nil && len(release.Date) >= 4 {
-		year, _ = strconv.Atoi(release.Date[:4])
+	var release *metadata.MBRelease
+	if item.ReleaseID != "" {
+		release, err = s.musicbrainz.GetReleaseForGroup(item.ReleaseGroupID, item.ReleaseID)
+	} else {
+		release, err = s.musicbrainz.GetBestRelease(item.ReleaseGroupID)
 	}
-
-	// Create album with image URL
-	imageURL := fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", item.ReleaseGroupID)
-	result, err := s.db.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status)
-		VALUES (?, ?, ?, ?, 'album', ?, ?, 'wanted')`,
-		artistID, item.ReleaseGroupID, albumTitle, year, item.QualityProfileID, imageURL)
+	if err != nil || release == nil {
+		res.Message = "MusicBrainz release lookup failed"
+		return res
+	}
+	artist := group.ArtistCredit[0].Artist
+	input := postprocess.MusicImport{ArtistMBID: artist.ID, ArtistName: artist.Name, ArtistSortName: artist.SortName, ReleaseGroupID: group.ID, ReleaseID: release.ID, Title: group.Title, EditionTitle: release.Title, EditionDisambiguation: release.Disambiguation, AlbumType: strings.ToLower(group.PrimaryType), QualityProfileID: item.QualityProfileID, ImageURL: "/api/music/cover?rgid=" + group.ID}
+	if len(release.Date) >= 4 {
+		input.Year, _ = strconv.Atoi(release.Date[:4])
+	}
+	for _, disc := range release.Media {
+		for _, track := range disc.Tracks {
+			input.Tracks = append(input.Tracks, postprocess.MusicImportTrack{RecordingID: track.Recording.ID, Title: track.Title, Number: track.Position, DiscNumber: disc.Position, DurationMS: track.Length})
+		}
+	}
+	albumID, err := s.processor.ImportMusic(item.SourcePath, input)
 	if err != nil {
-		res.Status = "error"
-		res.Message = "create album: " + err.Error()
+		res.Message = "Import failed: " + err.Error()
 		return res
 	}
-	albumID, _ := result.LastInsertId()
-
-	// Insert tracks from MusicBrainz
-	trackCount := 0
-	if release != nil {
-		for _, media := range release.Media {
-			for _, track := range media.Tracks {
-				s.db.Exec(`INSERT INTO tracks (album_id, mbid, title, number, disc_number, duration_ms)
-					VALUES (?, ?, ?, ?, ?, ?)`,
-					albumID, track.Recording.ID, track.Title, track.Position, media.Position, track.Length)
-				trackCount++
-			}
-		}
-		s.db.Exec(`UPDATE albums SET track_count = ?, mbid = ? WHERE id = ?`, trackCount, release.ID, albumID)
-	}
-
-	// Get tracks from DB for matching
-	rows, err := s.db.Query(`SELECT id, number, disc_number, title FROM tracks WHERE album_id = ? ORDER BY disc_number, number`, albumID)
-	if err != nil {
-		res.Status = "imported"
-		res.LibraryID = int(albumID)
-		res.Message = "album created but tracks not matched"
-		return res
-	}
-	defer rows.Close()
-
-	type trackInfo struct {
-		id     int
-		number int
-		disc   int
-		title  string
-	}
-	var tracks []trackInfo
-	for rows.Next() {
-		var t trackInfo
-		rows.Scan(&t.id, &t.number, &t.disc, &t.title)
-		tracks = append(tracks, t)
-	}
-
-	maxDisc := 1
-	for _, t := range tracks {
-		if t.disc > maxDisc {
-			maxDisc = t.disc
-		}
-	}
-
-	// Match and move audio files
-	importedTracks := 0
-	for _, af := range audioFiles {
-		trackNum, discNum := parseTrackNumber(filepath.Base(af))
-		if trackNum == 0 {
-			continue
-		}
-
-		for _, t := range tracks {
-			if t.number == trackNum && (maxDisc == 1 || t.disc == discNum) {
-				ext := filepath.Ext(af)
-				destPath := postprocess.MusicTrackPath(s.cfg.MediaRoot, artistName, albumTitle, year, t.number, t.disc, t.title, ext)
-				if err := validateImportDestination(s.cfg.MediaRoot, destPath); err != nil {
-					slog.Warn("unsafe import destination", "error", err)
-					continue
-				}
-				if err := moveFileForImport(af, destPath); err != nil {
-					slog.Warn("import track move failed", "track", t.number, "error", err)
-					continue
-				}
-				if _, err := s.db.Exec(`UPDATE tracks SET file_path = ?, status = 'available' WHERE id = ?`, destPath, t.id); err != nil {
-					slog.Error("failed to record imported track", "error", err)
-					continue
-				}
-				importedTracks++
-				break
-			}
-		}
-	}
-
-	// Save cover art
-	albumDir := filepath.Dir(postprocess.MusicTrackPath(s.cfg.MediaRoot, artistName, albumTitle, year, 1, 1, "", ".flac"))
-	albumStatus := "wanted"
-	if importedTracks > 0 && importedTracks == trackCount {
-		albumStatus = "available"
-	}
-	if _, err := s.db.Exec(`UPDATE albums SET status = ?, root_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, albumStatus, albumDir, albumID); err != nil {
-		res.Status = "error"
-		res.Message = "failed to save import status"
-		return res
-	}
-	if importedTracks > 0 && s.processor != nil {
-		s.processor.SaveCoverToAlbumDir(int(albumID), albumDir, item.SourcePath)
-	}
-
-	// Cache cover art in background
-	if coverart := s.coverart; coverart != nil {
-		go coverart.GetCover(item.ReleaseGroupID)
-	}
-
-	s.db.Exec(`INSERT INTO activity_log (album_id, action, details) VALUES (?, 'imported', ?)`,
-		albumID, fmt.Sprintf("Imported %d/%d tracks for %s - %s", importedTracks, trackCount, artistName, albumTitle))
-
 	res.Status = "imported"
-	if importedTracks == 0 {
-		res.Status = "error"
-	}
-	res.LibraryID = int(albumID)
-	res.Message = fmt.Sprintf("Imported %d/%d tracks for %s - %s", importedTracks, trackCount, artistName, albumTitle)
-	slog.Info("imported music", "artist", artistName, "album", albumTitle, "tracks", importedTracks)
+	res.LibraryID = albumID
+	res.Message = fmt.Sprintf("Imported %d validated tracks for %s - %s", len(input.Tracks), artist.Name, group.Title)
 	return res
 }
 

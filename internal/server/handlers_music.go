@@ -11,6 +11,7 @@ import (
 
 	"mediaforge/internal/indexer"
 	"mediaforge/internal/metadata"
+	"mediaforge/internal/music"
 )
 
 // -- Discovery --
@@ -44,6 +45,17 @@ func (s *Server) handleMusicSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, "MusicBrainz client not initialized")
 		return
 	}
+	if r.URL.Query().Get("local") == "true" {
+		switch searchType {
+		case "artist":
+			writeMusicArtists(w, s.musicbrainz.SearchCatalogArtists(q, 25))
+		case "track":
+			writeJSON(w, 200, []albumResult{})
+		default:
+			writeJSON(w, 200, s.releaseGroupsToAlbumResults(s.musicbrainz.SearchCatalogReleaseGroups(q, 50), ""))
+		}
+		return
+	}
 
 	switch searchType {
 	case "artist":
@@ -61,6 +73,10 @@ func (s *Server) searchMusicByArtist(w http.ResponseWriter, q string) {
 		writeError(w, 502, "MusicBrainz search failed: "+err.Error())
 		return
 	}
+	writeMusicArtists(w, result.Artists)
+}
+
+func writeMusicArtists(w http.ResponseWriter, source []metadata.MBArtist) {
 
 	type artistResult struct {
 		ID       string `json:"id"`
@@ -72,7 +88,7 @@ func (s *Server) searchMusicByArtist(w http.ResponseWriter, q string) {
 	}
 
 	var artists []artistResult
-	for _, a := range result.Artists {
+	for _, a := range source {
 		artists = append(artists, artistResult{
 			ID:       a.ID,
 			Name:     a.Name,
@@ -124,7 +140,7 @@ func (s *Server) searchMusicByTrack(w http.ResponseWriter, q string) {
 				Title:     rel.ReleaseGroup.Title,
 				Year:      rel.Date,
 				Type:      rel.ReleaseGroup.PrimaryType,
-				CoverURL:  fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", rgID),
+				CoverURL:  "/api/music/cover?rgid=" + rgID,
 				TrackName: rec.Title,
 			}
 			if len(rec.ArtistCredit) > 0 {
@@ -160,7 +176,7 @@ func (s *Server) releaseGroupsToAlbumResults(groups []metadata.MBReleaseGroup, t
 			ar.Artist = rg.ArtistCredit[0].Artist.Name
 			ar.ArtistID = rg.ArtistCredit[0].Artist.ID
 		}
-		ar.CoverURL = fmt.Sprintf("https://coverartarchive.org/release-group/%s/front-250", rg.ID)
+		ar.CoverURL = "/api/music/cover?rgid=" + rg.ID
 
 		var libID int
 		if s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, rg.ID).Scan(&libID) == nil {
@@ -194,6 +210,7 @@ func (s *Server) handleMusicTrending(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type trendingAlbum struct {
+		Provider   string `json:"provider"`
 		Name       string `json:"name"`
 		Artist     string `json:"artist"`
 		ArtistMBID string `json:"artist_mbid"`
@@ -205,6 +222,7 @@ func (s *Server) handleMusicTrending(w http.ResponseWriter, r *http.Request) {
 	var albums []trendingAlbum
 	for _, a := range result.Albums.Album {
 		albums = append(albums, trendingAlbum{
+			Provider:   "lastfm",
 			Name:       a.Name,
 			Artist:     a.Artist.Name,
 			ArtistMBID: a.Artist.MBID,
@@ -270,14 +288,27 @@ func (s *Server) handleMusicAlbum(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get best release with tracks
-	release, err := s.musicbrainz.GetBestRelease(rgid)
+	var release *metadata.MBRelease
+	var errRelease error
+	if selected := r.URL.Query().Get("release_id"); selected != "" {
+		release, errRelease = s.musicbrainz.GetReleaseForGroup(rgid, selected)
+		if errRelease != nil {
+			writeError(w, http.StatusUnprocessableEntity, "Selected edition could not be verified for this album: "+errRelease.Error())
+			return
+		}
+	} else {
+		release, errRelease = s.musicbrainz.GetBestRelease(rgid)
+	}
+	err = errRelease
 	if err != nil {
 		slog.Warn("no releases found", "rgid", rgid, "error", err)
 	}
 
+	editions, _ := s.musicbrainz.GetReleasesForGroup(rgid)
 	writeJSON(w, 200, map[string]interface{}{
 		"release_group": rg,
 		"release":       release,
+		"editions":      editions,
 	})
 }
 
@@ -292,6 +323,9 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 		Year           int    `json:"year"`
 		AlbumType      string `json:"album_type"`
 		ProfileID      int    `json:"quality_profile_id"`
+		ReleaseID      string `json:"release_id"`
+		Monitored      bool   `json:"monitored"`
+		DownloadNow    bool   `json:"download_now"`
 		ImageURL       string `json:"image_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -314,10 +348,37 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 		writeError(w, 400, err.Error())
 		return
 	}
+	// Idempotent saves should remain usable when metadata is temporarily offline.
+	var alreadySaved int
+	if s.db.QueryRow(`SELECT id FROM albums WHERE release_group_id=?`, req.ReleaseGroupID).Scan(&alreadySaved) == nil {
+		if req.Monitored {
+			if _, err = s.db.Exec(`UPDATE albums SET monitored=1 WHERE id=?`, alreadySaved); err != nil {
+				writeError(w, 500, "could not enable monitoring")
+				return
+			}
+		}
+		s.musicSaveResponse(w, alreadySaved, 200, req.DownloadNow || req.Monitored)
+		return
+	}
 	// Fetch complete metadata before opening a transaction or creating an album.
 	var release *metadata.MBRelease
 	if s.musicbrainz != nil {
-		release, err = s.musicbrainz.GetBestRelease(req.ReleaseGroupID)
+		rg, lookupErr := s.musicbrainz.GetReleaseGroup(req.ReleaseGroupID)
+		if lookupErr != nil || len(rg.ArtistCredit) == 0 {
+			writeError(w, 502, "Could not verify album and artist identity with MusicBrainz.")
+			return
+		}
+		req.AlbumTitle, req.ArtistMBID, req.ArtistName = rg.Title, rg.ArtistCredit[0].Artist.ID, rg.ArtistCredit[0].Artist.Name
+		req.AlbumType = rg.PrimaryType
+		if len(rg.FirstRelease) >= 4 {
+			req.Year, _ = strconv.Atoi(rg.FirstRelease[:4])
+		}
+		req.ImageURL = "/api/music/cover?rgid=" + req.ReleaseGroupID
+		if req.ReleaseID != "" {
+			release, err = s.musicbrainz.GetReleaseForGroup(req.ReleaseGroupID, req.ReleaseID)
+		} else {
+			release, err = s.musicbrainz.GetBestRelease(req.ReleaseGroupID)
+		}
 		if err != nil {
 			writeError(w, 502, "failed to fetch album tracks: "+err.Error())
 			return
@@ -332,7 +393,19 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 	// Check if already in library
 	var existing int
 	if err := tx.QueryRow(`SELECT id FROM albums WHERE release_group_id = ?`, req.ReleaseGroupID).Scan(&existing); err == nil {
-		writeJSON(w, 200, map[string]interface{}{"id": existing, "message": "already in library"})
+		if req.Monitored {
+			if _, err = tx.Exec(`UPDATE albums SET monitored=1 WHERE id=?`, existing); err != nil {
+				writeError(w, 500, "could not enable monitoring")
+				return
+			}
+			if err = tx.Commit(); err != nil {
+				writeError(w, 500, "could not save monitoring")
+				return
+			}
+		} else {
+			tx.Rollback()
+		}
+		s.musicSaveResponse(w, existing, 200, req.DownloadNow || req.Monitored)
 		return
 	}
 
@@ -351,9 +424,9 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Create album
-	result, err := tx.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'wanted')`,
-		artistID, req.ReleaseGroupID, req.AlbumTitle, req.Year, req.AlbumType, req.ProfileID, req.ImageURL)
+	result, err := tx.Exec(`INSERT INTO albums (artist_id, release_group_id, title, year, album_type, quality_profile_id, image_url, status,monitored)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'wanted',?)`,
+		artistID, req.ReleaseGroupID, req.AlbumTitle, req.Year, req.AlbumType, req.ProfileID, req.ImageURL, req.Monitored)
 	if err != nil {
 		writeError(w, 500, "create album: "+err.Error())
 		return
@@ -371,7 +444,7 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 				trackCount++
 			}
 		}
-		if _, err := tx.Exec(`UPDATE albums SET track_count = ?, mbid = ? WHERE id = ?`, trackCount, release.ID, albumID); err != nil {
+		if _, err := tx.Exec(`UPDATE albums SET track_count = ?, mbid = ?,edition_title=?,edition_disambiguation=? WHERE id = ?`, trackCount, release.ID, release.Title, release.Disambiguation, albumID); err != nil {
 			writeError(w, 500, "failed to save album tracks")
 			return
 		}
@@ -387,17 +460,14 @@ func (s *Server) handleAddMusicToLibrary(w http.ResponseWriter, r *http.Request)
 		writeError(w, 500, "failed to save album")
 		return
 	}
-	if coverart := s.coverart; coverart != nil {
-		go coverart.GetCover(req.ReleaseGroupID)
-	}
-	writeJSON(w, 201, map[string]int64{"id": albumID})
+	s.musicSaveResponse(w, int(albumID), 201, req.DownloadNow || req.Monitored)
 }
 
 func (s *Server) handleListMusicLibrary(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 
 	query := `SELECT al.id, al.title, al.year, al.album_type, al.status, al.release_group_id, al.image_url,
-		al.track_count, al.rating, al.rating_comment, a.name as artist_name, a.mbid as artist_mbid
+		al.track_count, al.rating, al.rating_comment, a.name as artist_name, a.mbid as artist_mbid,al.monitored,al.favorite
 		FROM albums al JOIN artists a ON al.artist_id = a.id`
 	var args []interface{}
 
@@ -415,29 +485,32 @@ func (s *Server) handleListMusicLibrary(w http.ResponseWriter, r *http.Request) 
 	defer rows.Close()
 
 	type libraryAlbum struct {
-		ID             int            `json:"id"`
-		Title          string         `json:"title"`
-		Year           sql.NullInt64  `json:"-"`
-		YearVal        int            `json:"year"`
-		AlbumType      string         `json:"album_type"`
-		Status         string         `json:"status"`
-		ReleaseGroupID string         `json:"release_group_id"`
-		ImageURL       sql.NullString `json:"-"`
-		ImageURLVal    string         `json:"image_url"`
-		TrackCount     int            `json:"track_count"`
-		Rating         sql.NullInt64  `json:"-"`
-		RatingVal      int            `json:"rating,omitempty"`
-		RatingComment  sql.NullString `json:"-"`
-		RatingCommentV string         `json:"rating_comment,omitempty"`
-		ArtistName     string         `json:"artist_name"`
-		ArtistMBID     string         `json:"artist_mbid"`
+		ID             int               `json:"id"`
+		Title          string            `json:"title"`
+		Year           sql.NullInt64     `json:"-"`
+		YearVal        int               `json:"year"`
+		AlbumType      string            `json:"album_type"`
+		Status         string            `json:"status"`
+		ReleaseGroupID string            `json:"release_group_id"`
+		ImageURL       sql.NullString    `json:"-"`
+		ImageURLVal    string            `json:"image_url"`
+		TrackCount     int               `json:"track_count"`
+		Rating         sql.NullInt64     `json:"-"`
+		RatingVal      int               `json:"rating,omitempty"`
+		RatingComment  sql.NullString    `json:"-"`
+		RatingCommentV string            `json:"rating_comment,omitempty"`
+		ArtistName     string            `json:"artist_name"`
+		ArtistMBID     string            `json:"artist_mbid"`
+		Monitored      bool              `json:"monitored"`
+		Favorite       bool              `json:"favorite"`
+		Acquisition    music.Acquisition `json:"acquisition"`
 	}
 
 	var albums []libraryAlbum
 	for rows.Next() {
 		var a libraryAlbum
 		if err := rows.Scan(&a.ID, &a.Title, &a.Year, &a.AlbumType, &a.Status, &a.ReleaseGroupID,
-			&a.ImageURL, &a.TrackCount, &a.Rating, &a.RatingComment, &a.ArtistName, &a.ArtistMBID); err != nil {
+			&a.ImageURL, &a.TrackCount, &a.Rating, &a.RatingComment, &a.ArtistName, &a.ArtistMBID, &a.Monitored, &a.Favorite); err != nil {
 			slog.Warn("music album scan failed", "error", err)
 			continue
 		}
@@ -460,6 +533,10 @@ func (s *Server) handleListMusicLibrary(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	rows.Close()
+	for i := range albums {
+		albums[i].Acquisition = music.Snapshot(s.db, albums[i].ID)
+	}
 	if albums == nil {
 		albums = []libraryAlbum{}
 	}
@@ -522,32 +599,35 @@ func (s *Server) handleGetMusicLibraryItem(w http.ResponseWriter, r *http.Reques
 	}
 
 	var album struct {
-		ID             int            `json:"id"`
-		Title          string         `json:"title"`
-		Year           sql.NullInt64  `json:"-"`
-		YearVal        int            `json:"year"`
-		AlbumType      string         `json:"album_type"`
-		Status         string         `json:"status"`
-		ReleaseGroupID string         `json:"release_group_id"`
-		ImageURL       sql.NullString `json:"-"`
-		ImageURLVal    string         `json:"image_url"`
-		TrackCount     int            `json:"track_count"`
-		Rating         sql.NullInt64  `json:"-"`
-		RatingVal      int            `json:"rating,omitempty"`
-		RatingComment  sql.NullString `json:"-"`
-		RatingCommentV string         `json:"rating_comment,omitempty"`
-		ArtistName     string         `json:"artist_name"`
-		ArtistMBID     string         `json:"artist_mbid"`
-		ProfileID      sql.NullInt64  `json:"-"`
-		ProfileIDVal   int            `json:"quality_profile_id"`
+		ID             int               `json:"id"`
+		Title          string            `json:"title"`
+		Year           sql.NullInt64     `json:"-"`
+		YearVal        int               `json:"year"`
+		AlbumType      string            `json:"album_type"`
+		Status         string            `json:"status"`
+		ReleaseGroupID string            `json:"release_group_id"`
+		ImageURL       sql.NullString    `json:"-"`
+		ImageURLVal    string            `json:"image_url"`
+		TrackCount     int               `json:"track_count"`
+		Rating         sql.NullInt64     `json:"-"`
+		RatingVal      int               `json:"rating,omitempty"`
+		RatingComment  sql.NullString    `json:"-"`
+		RatingCommentV string            `json:"rating_comment,omitempty"`
+		ArtistName     string            `json:"artist_name"`
+		ArtistMBID     string            `json:"artist_mbid"`
+		Monitored      bool              `json:"monitored"`
+		Favorite       bool              `json:"favorite"`
+		Acquisition    music.Acquisition `json:"acquisition"`
+		ProfileID      sql.NullInt64     `json:"-"`
+		ProfileIDVal   int               `json:"quality_profile_id"`
 	}
 
 	err = s.db.QueryRow(`SELECT al.id, al.title, al.year, al.album_type, al.status, al.release_group_id,
-		al.image_url, al.track_count, al.rating, al.rating_comment, a.name, a.mbid, al.quality_profile_id
+		al.image_url, al.track_count, al.rating, al.rating_comment, a.name, a.mbid, al.quality_profile_id,al.monitored,al.favorite
 		FROM albums al JOIN artists a ON al.artist_id = a.id WHERE al.id = ?`, id).Scan(
 		&album.ID, &album.Title, &album.Year, &album.AlbumType, &album.Status, &album.ReleaseGroupID,
 		&album.ImageURL, &album.TrackCount, &album.Rating, &album.RatingComment, &album.ArtistName,
-		&album.ArtistMBID, &album.ProfileID)
+		&album.ArtistMBID, &album.ProfileID, &album.Monitored, &album.Favorite)
 	if err != nil {
 		writeError(w, 404, "album not found")
 		return
@@ -569,6 +649,7 @@ func (s *Server) handleGetMusicLibraryItem(w http.ResponseWriter, r *http.Reques
 		album.ProfileIDVal = int(album.ProfileID.Int64)
 	}
 
+	album.Acquisition = music.Snapshot(s.db, id)
 	// Get tracks
 	trackRows, err := s.db.Query(`SELECT id, title, number, disc_number, duration_ms, status, file_path
 		FROM tracks WHERE album_id = ? ORDER BY disc_number, number`, id)
@@ -687,46 +768,40 @@ func (s *Server) handleSearchMusicAlbum(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Get album info
-	var artist, title string
-	var year sql.NullInt64
-	var profileID int
-	err = s.db.QueryRow(`SELECT a.name, al.title, al.year, al.quality_profile_id
-		FROM albums al JOIN artists a ON al.artist_id = a.id WHERE al.id = ?`, id).
-		Scan(&artist, &title, &year, &profileID)
+	identity, year, profileID, err := s.musicIdentity(id)
 	if err != nil {
 		writeError(w, 404, "album not found")
 		return
 	}
-
-	// Load indexers
-	allIndexers := s.loadIndexers()
-	if len(allIndexers) == 0 {
-		writeJSON(w, 200, []interface{}{})
+	profile := s.loadProfile(profileID)
+	if profile == nil {
+		writeError(w, 409, "Choose a music quality profile first.")
 		return
 	}
-
-	// Newznab search
+	allIndexers := s.loadIndexers()
 	newznabIdxs := filterIndexersByType(allIndexers, "newznab", "music")
-	releases := s.newznab.SearchMusic(newznabIdxs, artist, title, int(year.Int64))
-	for i := range releases {
-		releases[i].DownloadType = "nzb"
-	}
-
-	// Rutracker search
 	rtIndexers := filterIndexersByType(allIndexers, "rutracker", "music")
-	if len(rtIndexers) > 0 {
-		query := fmt.Sprintf("%s %s", artist, title)
-		rtReleases := s.searchRutracker(rtIndexers, query, "music")
-		releases = append(releases, rtReleases...)
+	if len(newznabIdxs)+len(rtIndexers) == 0 {
+		writeError(w, 409, "No music sources are enabled. Configure a music indexer in Settings.")
+		return
 	}
-
-	// Load profile and score
-	profile := s.loadProfile(profileID)
-	if profile != nil {
-		for i := range releases {
-			indexer.ScoreRelease(&releases[i], profile)
-		}
+	releases := []indexer.Release{}
+	var searchErrors int
+	if len(newznabIdxs) > 0 && s.newznab != nil {
+		result := s.newznab.SearchMusicAlbum(newznabIdxs, identity, year, profile)
+		releases = append(releases, result.Releases...)
+		searchErrors = len(result.Errors)
+	}
+	if len(rtIndexers) > 0 && s.rutracker != nil {
+		query := fmt.Sprintf("%s %s", identity.Artist, identity.Album)
+		releases = append(releases, s.searchRutracker(rtIndexers, query, "music")...)
+	}
+	for i := range releases {
+		indexer.ScoreMusicRelease(&releases[i], profile, identity)
+	}
+	if len(releases) == 0 && searchErrors > 0 {
+		writeError(w, 502, "Music sources could not be searched. Check their connections in Settings and retry.")
+		return
 	}
 
 	writeJSON(w, 200, releases)
@@ -792,15 +867,23 @@ func (s *Server) handleGrabMusicRelease(w http.ResponseWriter, r *http.Request) 
 		writeError(w, 400, "valid album_id and JSON required")
 		return
 	}
-	var title string
-	if err := s.db.QueryRow(`SELECT title FROM albums WHERE id=?`, req.AlbumID).Scan(&title); err != nil {
+	identity, _, profileID, err := s.musicIdentity(req.AlbumID)
+	if err != nil {
 		writeError(w, 404, "album not found")
 		return
 	}
-	if req.Title != "" {
-		title = req.Title
+	if strings.TrimSpace(req.Title) == "" {
+		writeError(w, 400, "Release title is required to verify the artist and album.")
+		return
 	}
-	nzoID, err := s.enqueueRelease(0, 0, req.AlbumID, indexer.Release{Title: title, NZBURL: req.ReleaseURL, DownloadType: req.DownloadType, TopicID: req.TopicID})
+	parsed := indexer.ParseMusicReleaseName(req.Title)
+	release := indexer.Release{Title: req.Title, NZBURL: req.ReleaseURL, DownloadType: req.DownloadType, TopicID: req.TopicID, Quality: parsed.Quality, Tags: parsed.Tags}
+	indexer.ScoreMusicRelease(&release, s.loadProfile(profileID), identity)
+	if !release.Acceptable {
+		writeError(w, 400, release.RejectReason)
+		return
+	}
+	nzoID, err := s.enqueueRelease(0, 0, req.AlbumID, release)
 	if err != nil {
 		writeError(w, 502, err.Error())
 		return
@@ -810,27 +893,7 @@ func (s *Server) handleGrabMusicRelease(w http.ResponseWriter, r *http.Request) 
 
 // -- Cover Art --
 
-func (s *Server) handleMusicCover(w http.ResponseWriter, r *http.Request) {
-	rgid := r.URL.Query().Get("rgid")
-	if rgid == "" {
-		writeError(w, 400, "rgid required")
-		return
-	}
-
-	if s.coverart == nil {
-		writeError(w, 503, "CoverArt client not initialized")
-		return
-	}
-
-	path, err := s.coverart.GetCover(rgid)
-	if err != nil {
-		writeError(w, 502, "cover art not available")
-		return
-	}
-
-	w.Header().Set("Cache-Control", "public, max-age=604800")
-	http.ServeFile(w, r, path)
-}
+func (s *Server) handleMusicCover(w http.ResponseWriter, r *http.Request) { s.serveMusicArtwork(w, r) }
 
 // -- Helpers --
 // loadIndexers is defined in handlers_episodes.go

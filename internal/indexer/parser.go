@@ -141,17 +141,18 @@ var musicQualityPatterns = []struct {
 	Name    string
 	Pattern *regexp.Regexp
 }{
-	{"flac-24bit", regexp.MustCompile(`(?i)(24.?bit.*flac|flac.*24.?bit|hi.?res.*flac|24bit)`)},
+	{"flac-24bit", regexp.MustCompile(`(?i)(\b24[ ._-]?bit\b.*\bflac\b|\bflac\b.*\b24[ ._-]?bit\b|\bhi[ ._-]?res\b.*\bflac\b)`)},
 	{"flac", regexp.MustCompile(`(?i)\bflac\b`)},
-	{"mp3-320", regexp.MustCompile(`(?i)(mp3.?320|320.?kbps|320k)`)},
-	{"mp3-v0", regexp.MustCompile(`(?i)(mp3.?v0|v0\b|vbr)`)},
-	{"aac-256", regexp.MustCompile(`(?i)(aac.?256|256.?aac|m4a)`)},
+	{"mp3-320", regexp.MustCompile(`(?i)(\bmp3\b.*\b320(?:[ ._-]?kbps|k)?\b|\b320(?:[ ._-]?kbps|k)?\b.*\bmp3\b)`)},
+	{"mp3-v0", regexp.MustCompile(`(?i)(\bmp3\b.*\b(?:v0|vbr)\b|\b(?:v0|vbr)\b.*\bmp3\b)`)},
+	{"aac-256", regexp.MustCompile(`(?i)(\baac\b.*\b256(?:[ ._-]?kbps|k)?\b|\b256(?:[ ._-]?kbps|k)?\b.*\baac\b)`)},
 	{"ogg", regexp.MustCompile(`(?i)\bogg\b`)},
 }
 
 // ParseMusicReleaseName extracts quality from a music release name.
 func ParseMusicReleaseName(name string) ParsedRelease {
 	result := ParsedRelease{}
+	name = strings.ReplaceAll(name, "_", " ")
 
 	for _, qp := range musicQualityPatterns {
 		if qp.Pattern.MatchString(name) {
